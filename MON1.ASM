@@ -58,10 +58,28 @@ HEXSTR    EQU       DISBUF+DISBUFLEN
 
           SECTION   MON_CODE
 
+*--------------------------------------------------------------------
+* This code can be LRESPR'd, in which case we get the 'MON' command,
+* or, can be EXEC'd in which case, we get a job. Smart!
+*--------------------------------------------------------------------
+* Standard QDOS job header. 
+*--------------------------------------------------------------------
           BRA.S     START
+
+*--------------------------------------------------------------------
+* Use the filler long word to hold the base address of the job's 
+* dataspace - if it was stared by EXEC. Otherwise, it's random.
+*--------------------------------------------------------------------
 SYSVARS   DS.L      1
+
           DC.W      $4AFB,8
           DC.B      'MULTIMON'
+
+*--------------------------------------------------------------------
+* Call MT_INF to get the current jobid in D1.L. If this is zero, we
+* are in SuperBASIC so link MON in as a new procedure. Otherwise, we
+* have been EXEC'd and are running as a standalone job.
+*--------------------------------------------------------------------
 START     MOVEQ     #MT_INF,D0
           TRAP      #1
           TST.L     D1
@@ -69,6 +87,19 @@ START     MOVEQ     #MT_INF,D0
           LEA       PROCTAB,A1
           MOVE.W    BP_INIT,A2
           JMP       (A2)
+
+*--------------------------------------------------------------------
+* If we arrive here, we are running as a standalone job:
+*
+* A4.L = Start of dataspace, relative to A6.L.
+* A5.L = End of dataspace, relative to A6.L. (One byte past the end!)
+* A6.L = JB_END.
+* A7 = USP
+*
+*--------------------------------------------------------------------
+* Point A6.L at the absolute address of the dataspace area for this
+* job, then save it in SYSVARS.
+*--------------------------------------------------------------------
 START2    ADDA.L    A4,A6
           LEA       SYSVARS,A1
           MOVE.L    A6,(A1)
@@ -81,6 +112,9 @@ START2    ADDA.L    A4,A6
           ST        RELMOD(A6)
           LEA       EXTABEND(A6),A7
           MOVEQ     #10,D0
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 SETTRAPS  PEA       EXBRKPNT
           DBF       D0,SETTRAPS
           PEA       EXINTL7
@@ -96,14 +130,25 @@ SETTRAPS  PEA       EXBRKPNT
           MOVEQ     #-1,D1
           MOVEQ     #MT_TRAPV,D0
           TRAP      #1
+
+*--------------------------------------------------------------------
+* There are 5 separate windows to be opened at startup. D7 has the
+* count and A4 points at the first one. 
+*--------------------------------------------------------------------
           MOVEQ     #5,D7
           LEA       WNDPRMS,A4
           LEA       PROMPTWND(A6),A5
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 OPEN_LP   MOVE.L    A4,A0
           LEA       WNDPAR1,A1
           TST.W     D7
           BNE.S     DO_OPEN
           LEA       WNDPAR2,A1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DO_OPEN   MOVE.W    UT_WINDW,A2  SET UP DISPLAY WND'S
           JSR       (A2)
           BNE       QMON_1       QUIT IF ERR
@@ -137,37 +182,98 @@ BAS_ENT   MOVEQ     #-1,D1
           TRAP      #1
 BAS_QUIT  RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 PROCTAB   DC.W      1
           DC.W      BAS_ENT-*
           DC.B      3,'MON'
           DS.W      0
           DC.W      0,0,0
 
+*--------------------------------------------------------------------
+* The uppermost window displays a minilam help prompt all the time.
+*--------------------------------------------------------------------
 WNDPRMS   DC.W      16
           DC.B      'SCR_448X12A32X16'  PROMPT WINDOW
           DS.W      0
+
+*--------------------------------------------------------------------
+* The biggest window is to display the registers and the 8 bytes of
+* RAM around each of the An registers. Also seen here is:
+* 
+* SP = Suppervisor SP.
+* A7 = User SP.
+* BP = Job start address.
+* TP = Job end address.
+* REL ON|OFF = Are addresses within the range BP to TP shown as 
+*              relative or absolute addresses. Absolute are only the
+*              lower 5 digits though.
+*--------------------------------------------------------------------
           DC.W      17
           DC.B      'SCR_448X112A32X28' REGISTER WINDOW
           DS.W      0
+
+*--------------------------------------------------------------------
+* The two line MEMORY WINDOW displays 17 byes around the address of
+* the memory pointer. There are 8 below and 8 above, which is 17 as
+* the current MP is there too, and highlighted.
+*--------------------------------------------------------------------
           DC.W      17
           DC.B      'SCR_448X22A32X140' MEMORY WINDOW
           DS.W      0
+
+*--------------------------------------------------------------------
+* The COMMAND WINDOW is where commands are entered and where the
+* sign on message is displayed at startup.
+*--------------------------------------------------------------------
           DC.W      17
           DC.B      'CON_448X42A32X174' COMMAND WINDOW
           DS.W      0
+
+*--------------------------------------------------------------------
+* This window is above the COMMAND WINDOW and displays a disassembly
+* of the instruction at the current MP's address.
+*--------------------------------------------------------------------
           DC.W      17
           DC.B      'SCR_448X12A32X162' DISASSEM WINDOW
           DS.W      0
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
           DC.W      17
           DC.B      'SCR_448X190A32X27' AUX WINDOW
           DS.W      0
+
+*--------------------------------------------------------------------
+* Window parameters for the main windows:
+*
+* BORDER COLOUR = RED
+* BORDER WIDTH = 1
+* PAPER/STRIP COLOUR = BLACK
+* INK COLOUR = WHITE
+*--------------------------------------------------------------------
 WNDPAR1   DC.B      2,1,0,7
+
+*--------------------------------------------------------------------
+* Window parameters for the help window:
+*
+* BORDER COLOUR = BLACK
+* BORDER WIDTH = 0
+* PAPER/STRIP COLOUR = RED
+* INK COLOUR = WHITE
+*--------------------------------------------------------------------
 WNDPAR2   DC.B      0,0,2,7
+
+*--------------------------------------------------------------------
+* A small sign on message displayed at startup in the COMMAND WINDOW.
+*--------------------------------------------------------------------
 SIGNON    DC.W      39
           DC.B      'MULTIMON V2.1',10
-          DC.B      ' 1986, 87 JAN BREDENBEEK'
+          DC.B      ' 1986, 87 JAN BREDENBEEK'   ; CHR$(127) (C)
           DS.W      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 SAVREGS   MOVE.L    A6,-(A7)
           MOVE.L    $28064,A6
           MOVE.L    (A6),A6
@@ -200,6 +306,8 @@ GO_MON    MOVE.L    A2,$28064
 GO_MON1   MOVE      #$0000,SR
           JMP       (A5)
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 RESTREGS  MOVEQ     #0,D0
           TRAP      #1
           TRAP      #0
@@ -237,6 +345,8 @@ RR_BADJB  ANDI      #$DFFF,SR
           MOVEQ     #-2,D0
           BRA       PRT_ERR
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 *READ LINE FROM KBD
 
 RDSTRING  LEA       DISBUF+2(A6),A2
@@ -246,6 +356,8 @@ RDSTRING  LEA       DISBUF+2(A6),A2
           MOVE.W    D1,-(A1)
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 READ_LINE LEA       DISBUF(A6),A2
           MOVEQ     #DISBUFLEN,D2
 RDLIN_2   MOVE.L    CMDWND(A6),A0
@@ -259,6 +371,19 @@ RDLIN_2   MOVE.L    CMDWND(A6),A0
           MOVE.L    A2,A1
           RTS
 
+*--------------------------------------------------------------------
+* Prompt the user to supply an address. This may be as follows:
+*
+* %bbbbbbb       = binary - 32 bits max
+* &nnnnnnn       = decimal
+* hhhhhhhh       = hexadecimal - 8 digits max
+* M              = Current memory pointer
+* S              = Base pointer = BP = Start of job
+* (Rn.s,Rm.s...) = Add registers and use result as address.
+*
+* Returns the address in D1.L and sets D0 and the Z flag to indicate
+* errors.
+*--------------------------------------------------------------------
 GET_ADDR  MOVEM.L   D2-D4/A0-A1,-(A7)
           BSR.S     READ_LINE
           MOVEQ     #0,D4
@@ -273,18 +398,18 @@ GTAD_2    ADDQ.W    #1,A1
 GTAD_3    MOVE.B    (A1),D0
           CMPI.B    #10,D0
           BEQ       GTAD_E
-          CMPI.B    #'%',D0
+          CMPI.B    #'%',D0         ; Get address in binary
           BEQ.S     GTAD_P
-          CMPI.B    #'&',D0
+          CMPI.B    #'&',D0         ; Get address in decimal
           BEQ.S     GTAD_D
-          CMPI.B    #'(',D0
-          BEQ.S     GTAD_B
+          CMPI.B    #'(',D0         ; Get address from a register addition
+          BEQ.S     GTAD_B          ; expression like (A1,A2.W...)
           ANDI.B    #$DF,D0
-          CMPI.B    #'M',D0
+          CMPI.B    #'M',D0         ; Current Memory Pointer value
           BEQ.S     GTAD_M
-          CMPI.B    #'S',D0
+          CMPI.B    #'S',D0         ; Start of job = BP in Register Window
           BEQ.S     GTAD_S
-          BSR       READHEX
+          BSR       READHEX         ; Get address in hexadecimal. (Default)
           BNE       GTAD_RTS
           BRA.S     GTAD_4
 GTAD_D    ADDQ.W    #1,A1
@@ -345,12 +470,17 @@ GTAD_ERR  MOVEQ     #-17,D0
 GTAD_RTS  MOVEM.L   (A7)+,D2-D4/A0-A1
           TST.L     D0
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 ADDVAL    TST.B     D3
           BEQ.S     ADDVAL_1
           NEG.L     D1
 ADDVAL_1  ADD.L     D1,D4
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 READHEX   MOVEQ     #0,D1
           MOVEQ     #0,D0
           MOVE.L    A1,A0
@@ -374,9 +504,12 @@ GHEX_END  CMPA.L    A0,A1
           BEQ.S     GHEX_ERR
           MOVEQ     #0,D0
           RTS
+
 GHEX_ERR  MOVEQ     #-17,D0
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 READDEC   MOVEQ     #0,D1
           MOVEQ     #0,D0
           MOVE.L    A1,A0
@@ -393,6 +526,8 @@ RDEC_LOOP MOVE.B    (A1),D0
           ADDQ.W    #1,A1
           BRA.S     RDEC_LOOP
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 READBIN   MOVEQ     #0,D1
           MOVEQ     #0,D0
           MOVE.L    A1,A0
@@ -406,6 +541,8 @@ RDBIN_LP  MOVE.B    (A1),D0
           ADDQ.W    #1,A1
           BRA.S     RDBIN_LP
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 *PROMPT WINDOW HANDLER
 
 DSPROMPT  MOVE.L    PROMPTWND(A6),A0
@@ -421,10 +558,14 @@ DSPROMPT  MOVE.L    PROMPTWND(A6),A0
           JSR       (A2)
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 PROMPTMSG DC.W      45
           DC.B      'F1 = Help  F2 = Memory Dump  F3 = Disassemble'
           DS.W      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 *REGISTER WINDOW HANDLER
 
 DSPADDREG MOVE.W    CN_ITOHL,A2
@@ -451,6 +592,8 @@ D_AR_LP   LEA       MATHSTK,A1
           MOVE.W    (A7)+,A1
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DSPREG    SUBA.L    A1,A1
           LEA       REGMSG+1,A0
           SUBA.L    A6,A0
@@ -528,7 +671,10 @@ PR_REL    MOVE.L    D1,4(A1)
           MOVEQ     #'>',D4
           BRA.S     DSPREGP
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
           SECTION   MON_END
+
 REGMSG    DC.W      REGEND-REGMSG-2
           DC.B      'D0 00000000  A0 00000000  (A0) 00 00 00 00 00 00 00 00',10
           DC.B      'D1 00000000  A1 00000000  (A1) 00 00 00 00 00 00 00 00',10
@@ -544,7 +690,10 @@ REGMSG    DC.W      REGEND-REGMSG-2
 REGEND    EQU       *
           DC.W      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
           SECTION   MON_CODE
+
 *CHANGE REGPTR ROUTINES
 
 RP_ADD1   MOVEQ     #4,D5
@@ -569,6 +718,8 @@ RP_STORE  MOVE.W    D0,REGPTR(A6)
           BSR.S     DSPREGP
           BRA       MAIN_1
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 *PRINT REGISTER POINTER
 
 DSPREGP   MOVE.L    REGWND(A6),A0
@@ -589,9 +740,23 @@ DSPRSP    MOVE.W    REGPTR(A6),D0
           MOVEQ     #SD_SETST,D0
           TRAP      #3
           RTS
+
+*--------------------------------------------------------------------
+* The position table, x,y, where the '>' cursor will be placed in the
+* REGISTER WINDOW when the user presses the ALT Arrow keys to move
+* to the desired register.
+*
+* Using ALT DOWN We go from D0 down to D7, then from A0 to A7, then PC,
+* then BP, TP, SR and back to D0 again. ALT UP is the reverse.
+*
+* Using ALT LEFT we go from D0 to A0 to PC to D4 to A4 to D0. ALT 
+* RIGHT is the revesre. Weird!
+*--------------------------------------------------------------------
 POSTABLE  DC.W      2,0,2,1,2,2,2,3,2,4,2,5,2,6,2,7
           DC.W      12,0,12,1,12,2,12,3,12,4,12,5,12,6,12,7,12,8,26,9,39,9,2,10
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 *MEMORY POINTER WINDOW HANDLER
 
 DSPMEM    MOVE.L    MEMWND(A6),A0
@@ -671,6 +836,8 @@ DM2_LP    MOVEQ     #$20,D1
           DBF       D7,DM2_LP
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 *DISASSEMBLY WINDOW HANDLER
 
 DSPDIS    MOVE.L    DISWND(A6),A0
@@ -701,6 +868,10 @@ DSPDIS_2  MOVE.W    D4,D2
           TRAP      #3
           RTS
 
+*--------------------------------------------------------------------
+* In the unlikely event of an exception hapening, the following are
+* the messages that will be displayed.
+*--------------------------------------------------------------------
 *EXCEPTION MESSAGES
 
 ADDERRMSG DC.W      14
@@ -728,6 +899,8 @@ INTL7MSG  DC.W      18
           DC.B      10,'Interrupt Level 7'
           DS.W      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXINTL7   MOVE.L    A3,-(A7)
           LEA       $18020,A3
           SF        -$1E(A3)
@@ -772,6 +945,7 @@ EXBKPLP   CMPA.L    (A0),A1
           ADDQ.W    #6,A0
           DBF       D0,EXBKPLP
           RTS
+
 RST_OPC   MOVEQ     #0,D0
           MOVE.L    D0,(A0)+
           MOVE.W    (A0),(A1)
@@ -780,6 +954,8 @@ RST_OPC   MOVEQ     #0,D0
 UNDO_BRK  BSR.S     REMOVEBRK
           BRA.S     MAIN_REG
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 *MAIN EXECUTION LOOP
 
 NULMSG    DC.W      0
@@ -807,126 +983,220 @@ MAIN_ERR  MOVEQ     #0,D1
           MOVE.L    A2,A1
           MOVE.W    UT_MTEXT,A2
           JSR       (A2)
+
 MAIN_LOOP BSR       DSPROMPT
 MAIN_REG  BSR       DSPREG
 MAIN_MEM  BSR       DSPMEM
           BSR       DSPDIS
-MAIN_1    MOVE.L    CMDWND(A6),A0
+
+
+*--------------------------------------------------------------------
+* Here we have the re-entry point after a command has completed, or,
+* for example, when prompted for an address we cause an error. This
+* part of the code accepts a new command from the COMMAND WINDOW.
+*--------------------------------------------------------------------
+MAIN_1    MOVE.L    CMDWND(A6),A0   ; Command window to be used
           MOVEQ     #-1,D3
           MOVEQ     #10,D1
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-MAIN_2    MOVE.L    CMDWND(A6),A0
-          MOVEQ     #-1,D3
-          MOVEQ     #1,D1
-          MOVEQ     #0,D2
-          MOVEQ     #SD_SETSZ,D0
-          TRAP      #3
-          MOVEQ     #'>',D1
-          MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          MOVEQ     #SD_CURE,D0
-          TRAP      #3
-          MOVEQ     #IO_FBYTE,D0
-          TRAP      #3
-          CMPI.B    #'a',D1
-          BCS.S     SEARCHTAB
-          CMPI.B    #'z',D1
-          BHI.S     SEARCHTAB
-          SUBI.B    #$20,D1
-SEARCHTAB LEA       CMDTAB,A2
-NEXTCMD   MOVE.W    (A2)+,D0
-          BEQ.S     MAIN_1
-          CMP.B     D0,D1
-          BEQ.S     CMDFOUND
-          ADDQ.L    #2,A2
-          BRA.S     NEXTCMD
-CMDFOUND  ADDA.W    (A2),A2
-          TST.B     D1
-          BLT.S     JMPCMD
-          MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-JMPCMD    JMP       (A2)
+          TRAP      #3              ; Print a newline to the command window
 
-CMDTAB    DC.W      $C0
+MAIN_2    MOVE.L    CMDWND(A6),A0   ; Command window to be used
+          MOVEQ     #-1,D3
+          MOVEQ     #1,D1           ; 8 pixels wide
+          MOVEQ     #0,D2           ; 10 pixels high
+          MOVEQ     #SD_SETSZ,D0
+          TRAP      #3              ; Set channle font size
+          MOVEQ     #'>',D1         ; Cursor character
+          MOVEQ     #IO_SBYTE,D0
+          TRAP      #3              ; Print cursor
+          MOVEQ     #SD_CURE,D0
+          TRAP      #3              ; Make sure cursor is enabled
+          MOVEQ     #IO_FBYTE,D0
+          TRAP      #3              ; Wait for a single byte to D1.B
+          CMPI.B    #'a',D1
+          BCS.S     SEARCHTAB       ; D1 is less than 'a' (97)
+          CMPI.B    #'z',D1
+          BHI.S     SEARCHTAB       ; D1 is higher than 'z' (122)
+          SUBI.B    #$20,D1         ; Command is a letter command
+                                    ; but is lower case. Convert 
+                                    ; to upper case.
+
+*--------------------------------------------------------------------
+* Start searching the command table for the command in D1.B.
+*--------------------------------------------------------------------
+SEARCHTAB LEA       CMDTAB,A2
+
+
+*--------------------------------------------------------------------
+* Look for the next command in the command table if we haven't found
+* the one corresponding to D1.B yet.
+*--------------------------------------------------------------------
+NEXTCMD   MOVE.W    (A2)+,D0        ; Get the next command word
+          BEQ.S     MAIN_1          ; All done. Invalid command
+          CMP.B     D0,D1           ; Is this our command?
+          BEQ.S     CMDFOUND        ; Hooray!
+          ADDQ.L    #2,A2           ; Skip over the command's offset
+          BRA.S     NEXTCMD         ; And keep searching
+
+*--------------------------------------------------------------------
+* We have found our command in the table. Non-letter commands have 
+* bit 7 set, indicating negative values. This is used to good effect.
+*--------------------------------------------------------------------
+CMDFOUND  ADDA.W    (A2),A2         ; Add the offset to the command code
+          TST.B     D1              ; Letter command or arrow etc command?
+          BLT.S     JMPCMD          ; Non-lette commands don't echo
+          MOVEQ     #IO_SBYTE,D0    ; Letter commands do echo to the
+          TRAP      #3              ; COMMAND WINDOW
+JMPCMD    JMP       (A2)            ; Then do the action
+
+*--------------------------------------------------------------------
+* Command table is two words per command. The low word is the key for
+* the command and the second is an offset to the command. The upper
+* byte of the key is zero, only the lower byte is used.
+* A word of zero indicates the end of the table.
+*--------------------------------------------------------------------
+CMDTAB    DC.W      $C0             ; Arrow LEFT Change Memory Pointer
           DC.W      LEFT-*
-          DC.W      $C8
+
+          DC.W      $C8             ; Arrow RIGHT Change Memory Pointer
           DC.W      RIGHT-*
-          DC.W      $D0
+
+          DC.W      $D0             ; Arrow UP Change Memory Pointer
           DC.W      RIGHT8-*
-          DC.W      $D8
+
+          DC.W      $D8             ; Arrow DOWN Change Memory Pointer
           DC.W      LEFT8-*
-          DC.W      $C1
+
+          DC.W      $C1             ; ALT Arrow LEFT Change Register Pointer
           DC.W      RP_SUB8-*
-          DC.W      $C9
+
+          DC.W      $C9             ; ALT Arrow RIGHT Change Register Pointer
           DC.W      RP_ADD8-*
-          DC.W      $D1
+
+          DC.W      $D1             ; ALT Arrow UP Change Register Pointer
           DC.W      RP_SUB1-*
-          DC.W      $D9
+
+          DC.W      $D9             ; ALT Arrow DOWN Change Register Pointer
           DC.W      RP_ADD1-*
-          DC.W      $E8
+
+          DC.W      $E8             ; F1 Help
           DC.W      HELP-*
-          DC.W      $EC
+
+          DC.W      $EC             ; F2 Memory Dump
           DC.W      MEMDUMP-*
-          DC.W      $F0
+
+          DC.W      $F0             ; F3 Dissassemble
           DC.W      DIS_PAGE-*
-          DC.W      ' A'
+
+          DC.W      ' A'            ; A Alter memory
           DC.W      ALT_MEM-*
-          DC.W      ' B'
+
+          DC.W      ' B'            ; B Set breakpoint
           DC.W      BREAKPNT-*
-          DC.W      ' C'
+
+          DC.W      ' C'            ; C Call a subroutine
           DC.W      CALL-*
-          DC.W      ' D'
+
+          DC.W      ' D'            ; D Dissassemble to a file
           DC.W      DIS_FILE-*
-          DC.W      ' E'
+
+          DC.W      ' E'            ; E Examine a job
           DC.W      EXAMINE-*
-          DC.W      ' F'
+
+          DC.W      ' F'            ; F Fill memory
           DC.W      FILL-*
-          DC.W      ' G'
+
+          DC.W      ' G'            ; G Convert to decimal
           DC.W      HEXTODEC-*
-          DC.W      ' H'
+
+          DC.W      ' H'            ; H Convert to hexadecimal
           DC.W      DECTOHEX-*
-          DC.W      ' I'
+
+          DC.W      ' I'            ; I Set memory pointer indirect
           DC.W      INDIRECT-*
-          DC.W      ' J'
+
+          DC.W      ' J'            ; J Jump to location
           DC.W      JUMP-*
-          DC.W      ' K'
+
+          DC.W      ' K'            ; K Copy block of memory
           DC.W      COPY-*
-          DC.W      ' L'
+
+          DC.W      ' L'            ; L List memory to a file
           DC.W      MEMDUMP_1-*
-          DC.W      ' M'
+
+          DC.W      ' M'            ; M Set memory pointer
           DC.W      SMEMPTR-*
-          DC.W      ' N'
+
+          DC.W      ' N'            ; N Adjust memory pointer
           DC.W      ADD_MEM-*
-          DC.W      ' O'
+
+          DC.W      ' O'            ; O Change relative mode
           DC.W      CH_OFFSET-*
-          DC.W      ' Q'
+
+          DC.W      ' Q'            ; Q Quit
           DC.W      QMON-*
-          DC.W      ' R'
+
+          DC.W      ' R'            ; R Set current register value
           DC.W      SREG-*
-          DC.W      ' S'
+
+          DC.W      ' S'            ; S Search for a hexadecimal string
           DC.W      FIND_HEX-*
-          DC.W      ' T'
+
+          DC.W      ' T'            ; T Trace current instruction
           DC.W      TRACE-*
-          DC.W      ' U'
+
+          DC.W      ' U'            ; U Remove (undo) breakpoint
           DC.W      UNDO_BRK-*
-          DC.W      ' V'
+
+          DC.W      ' V'            ; V Display system info, list of jobs etc
           DC.W      VERSION-*
-          DC.W      ' X'
+
+          DC.W      ' X'            ; X Execute current instruction
           DC.W      XECUTE-*
+
           DC.W      0
+
+*--------------------------------------------------------------------
+* Arrow LEFT - decrement current memory pointer.
+*--------------------------------------------------------------------
 LEFT      MOVEQ     #-1,D1
           BRA.S     AMEMPTR
+
+*--------------------------------------------------------------------
+* Arrow RIGHT - increment current memory pointer.
+*--------------------------------------------------------------------
 RIGHT     MOVEQ     #1,D1
           BRA.S     AMEMPTR
+
+*--------------------------------------------------------------------
+* Arrow DOWN - decrement current memory pointer by 8.
+*--------------------------------------------------------------------
 LEFT8     MOVEQ     #-8,D1
           BRA.S     AMEMPTR
+
+*--------------------------------------------------------------------
+* Arrow UP - increment current memory pointer by 8.
+*--------------------------------------------------------------------
 RIGHT8    MOVEQ     #8,D1
           BRA.S     AMEMPTR
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 ADD_MEM   BSR       GETADDR1
+
+*--------------------------------------------------------------------
+* Called from LEFT, RIGHT, UP, DOWN to change the address of the 
+* current memeory pointer. D1.L is the offset that will be added to
+* the current address. The MEMORY WINDOW is redrawn to display the
+* new data - 8 bytes below and 8 bytes above the current MP.
+*--------------------------------------------------------------------
 AMEMPTR   ADD.L     D1,MEMPTR(A6)
           BRA       MAIN_MEM
 
+*--------------------------------------------------------------------
+* Q: Quit the program.
+*--------------------------------------------------------------------
 QMON      MOVEQ     #BKPTABSIZ-1,D0
           LEA       BRKPTAB(A6),A0
 QMON_BRK  TST.L     (A0)
@@ -961,24 +1231,41 @@ QMON_1    MOVE.L    D0,D7
           MOVE.L    D7,D3
           MOVEQ     #MT_FRJOB,D0
           TRAP      #1
+
+*--------------------------------------------------------------------
+* MEssage to be displayed when we choose to quit from the monitor.
+*--------------------------------------------------------------------
 QUITMSG   DC.W      19
           DC.B      10,'Exit from MULTIMON'
           DS.W      0
+
+*--------------------------------------------------------------------
+* Message to be displayed when an address is entered incorrectly.
+*--------------------------------------------------------------------
 HEXERRMSG DC.W      12
           DC.B      'Syntax error'
           DS.W      0
-GETADDR1  JSR       GET_ADDR
-          BEQ.S     GTAD1_RTS
-          ADDQ.W    #4,A7
-HEXERR    LEA       HEXERRMSG,A1
-          MOVE.L    CMDWND(A6),A0
-          MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          BRA       MAIN_1
+
+*--------------------------------------------------------------------
+* Call here to get an address. Returns only if no errors. Exits from
+* here by tidying the stack and returning via the main loop.
+*--------------------------------------------------------------------
+GETADDR1  JSR       GET_ADDR        ; Get an address
+          BEQ.S     GTAD1_RTS       ; All ok
+          ADDQ.W    #4,A7           ; Tidy return address of caller
+HEXERR    LEA       HEXERRMSG,A1    ; Error message to print
+          MOVE.L    CMDWND(A6),A0   ; Print it in the command window
+          MOVE.W    UT_MTEXT,A2     ; Vector
+          JSR       (A2)            ; Print message
+          BRA       MAIN_1          ; Exit to main loop to try again
 GTAD1_RTS RTS
 
-INDIRECT  BSR.S     GETADDR1
-          BCLR      #0,D1
+*--------------------------------------------------------------------
+* I: Set memory pointer indirect. In other words, prompt for the new
+* memory pointer address.
+*--------------------------------------------------------------------
+INDIRECT  BSR.S     GETADDR1        ; Returns if we got one
+          BCLR      #0,D1           ; Even things up
           MOVE.L    D1,A1
           MOVE.L    (A1),MEMPTR(A6)
           BRA.S     SMEM_1
@@ -1009,6 +1296,8 @@ SETPC_END BCLR      #0,D1
           MOVEQ     #0,D0
 SETPCRTS  RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 XECUTE    MOVE.L    MEMPTR(A6),D1
           BCLR      #0,D1
           MOVE.L    D1,IM_PC(A6)
@@ -1022,6 +1311,8 @@ JUMP      BSR.S     SET_PC
           BNE       HEXERR
 JUMP_2    JMP       RESTREGS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CALL      BSR.S     SET_PC
           BNE       HEXERR
           MOVE.L    IM_USP(A6),A1
@@ -1043,6 +1334,8 @@ CALL_RET  MOVE      SR,-(A7)
           JSR       SAVREGS
           BRA       MAIN_LOOP
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 TRACE     MOVE.L    MEMPTR(A6),D1
           BCLR      #0,D1
           MOVE.L    D1,IM_PC(A6)
@@ -1071,12 +1364,20 @@ ENTBRKP   MOVE.L    D1,(A1)+
           MOVE.W    (A0),(A1)
           MOVE.W    #$4E4F,(A0)
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 BREAKPNT  BSR.S     BRKP_SUB
 BRKP_END  BRA       MAIN_LOOP
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 BRKFULMSG DC.W      21
           DC.B      10,'Too many breakpoints'
           DS.W      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DIS_PAGE  MOVEQ     #SD_CURS,D0
           TRAP      #3
           BSR.S     ESC_MSG
@@ -1131,9 +1432,14 @@ ESC_MSG   MOVE.L    PROMPTWND(A6),A0
           LEA       ESCPROMPT,A1
           MOVE.W    UT_MTEXT,A2
           JMP       (A2)
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 ESCPROMPT DC.W      42
           DC.B      'Press any key to continue or <ESC> to exit'
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 MEMDUMP   MOVEQ     #SD_CURS,D0
           TRAP      #3
           MOVE.L    PROMPTWND(A6),A0
@@ -1213,12 +1519,20 @@ DM_CHR    MOVE.B    (A4)+,D1
 DM_CH1    MOVE.B    D1,(A0)+
           DBF       D2,DM_CHR
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 MD_MSG1   DC.W      MDMSG_END-*-2
           DC.B      '0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F'
 MDMSG_END EQU       *
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 MD_MSG2   DC.W      16
           DC.B      '0123456789ABCDEF'
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 ALT_MEM   MOVEQ     #10,D1
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3
@@ -1264,6 +1578,7 @@ GET_HLINE MOVE.B    2(A1),D6
           MOVE.L    A5,A4
           MOVE.W    D4,D1
 HEXL_END  RTS
+
 HEXL_ERR  ADDQ.W    #4,A7
           LEA       BADHEXMSG,A1
           MOVE.L    CMDWND(A6),A0
@@ -1273,6 +1588,8 @@ HEXL_ERR  ADDQ.W    #4,A7
 BADHEXMSG DC.B      0,7,'Bad Hex'
           DS.W      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 FIND_HEX  MOVEQ     #':',D1
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3
@@ -1299,6 +1616,8 @@ FH_END    MOVE.L    A3,MEMPTR(A6)
           BSR       DSPDIS
           BRA       MAIN_2
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DECTOHEX  BSR       GETADDR1
           LEA       DISBUF(A6),A0
           MOVE.L    #'  = ',(A0)+
@@ -1311,6 +1630,8 @@ DTOH_2    MOVEQ     #-1,D3
           TRAP      #3
           BRA       MAIN_1
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 HEXTODEC  BSR       GETADDR1
           LEA       DISBUF+14(A6),A1
           MOVEQ     #3,D2
@@ -1346,6 +1667,8 @@ HD_POS    MOVEQ     #' ',D0
 CH_OFFSET NOT.B     RELMOD(A6)
           BRA       MAIN_REG
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 OPEN_FILE LEA       FN_MSG,A1
           MOVE.W    UT_MTEXT,A2
           JSR       (A2)
@@ -1366,6 +1689,7 @@ OP_AGAIN  LEA       DISBUF(A6),A0
           LEA       MAIN_2,A1
 OP_QUIT   ADDQ.W    #4,A7
           JMP       (A1)
+
 OP_EXISTS MOVE.L    CMDWND(A6),A0
           LEA       EXIST_MSG,A1
           MOVE.W    UT_MTEXT,A2
@@ -1392,31 +1716,58 @@ OP_EXISTS MOVE.L    CMDWND(A6),A0
           TRAP      #2
           BRA.S     OP_AGAIN
 OP_OK     RTS
+
+*--------------------------------------------------------------------
+* Message to be printed when prompting for a file name.
+*--------------------------------------------------------------------
 FN_MSG    DC.B      0,10,$0A,'File Name'
+
+*--------------------------------------------------------------------
+* Message displayed when the requested file already exists.
+*--------------------------------------------------------------------
 EXIST_MSG DC.B      0,31,'File exists. Overwrite ? (Y/N) ',0
 
-FIRSTLAST MOVE.L    CMDWND(A6),A0
-          LEA       FIRSTMSG,A1
+*--------------------------------------------------------------------
+* Code to request the start and end addresses for some feature. 
+* The start address is returned in D4 and the end address in D1.L and
+* D5.L.
+* You will be repeatedly prompted if the start is bigger than the end
+* address or if an error occurs when getting the user's input.
+*--------------------------------------------------------------------
+FIRSTLAST MOVE.L    CMDWND(A6),A0   ; Channel ID to use
+          LEA       FIRSTMSG,A1     ; First message
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          JSR       GET_ADDR
-          BNE.S     FIRSTLAST
-          MOVE.L    D1,D4
-GT_LAST   LEA       LASTMSG,A1
+          JSR       (A2)            ; Print it
+          JSR       GET_ADDR        ; Fetch an address
+          BNE.S     FIRSTLAST       ; Repeat on error
+          MOVE.L    D1,D4           ; Save start address in D4.L
+
+GT_LAST   LEA       LASTMSG,A1      ; Last message
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          JSR       GET_ADDR
-          BNE.S     GT_LAST
-          MOVE.L    D1,D5
-          CMP.L     D4,D5
-          BLT.S     FIRSTLAST
+          JSR       (A2)            ; Print it
+          JSR       GET_ADDR        ; Fetch an address
+          BNE.S     GT_LAST         ; Repeat on error
+          MOVE.L    D1,D5           ; Copy end address in D5
+          CMP.L     D4,D5           ; End must be > start
+          BLT.S     FIRSTLAST       ; Try again, it's not
           RTS
+
+*--------------------------------------------------------------------
+* Messages displayed when prompting for the first and last addresses
+* for a particulat funtion of the monitor.
+*--------------------------------------------------------------------
 FIRSTMSG  DC.B      0,5,'First',0
 LASTMSG   DC.B      0,4,'Last'
 
+*--------------------------------------------------------------------
+* Header text written out for memory dumps.
+*--------------------------------------------------------------------
 MD_HEADR  DC.W      MDH_END-*-2
           DC.B      '       00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F  0123456789ABCDEF',10
 MDH_END   EQU       *         
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 MEMDUMP_1 MOVEQ     #2,D4
           BSR       OPEN_FILE
           MOVE.L    A0,A5
@@ -1459,6 +1810,8 @@ PRT_ERR   MOVE.L    CMDWND(A6),A0
           JSR       (A2)
           BRA       MAIN_2
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DIS_FILE  MOVEQ     #2,D4
           BSR       OPEN_FILE
           MOVE.L    A0,A5
@@ -1527,7 +1880,13 @@ WRKSP_ERR MOVE.L    CMDWND(A6),A0
           MOVEQ     #IO_CLOSE,D0
           TRAP      #2
           BRA       MAIN_1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 WRKERRMSG DC.B      0,18,'Workspace Overflow'
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DIS_START MOVE.L    WRKSPTR(A6),LBL_TBL(A6)
           SF        DISMOD(A6)
           MOVE.L    DISFRST(A6),A4
@@ -1570,10 +1929,21 @@ DIS_QUIT  MOVE.L    D0,D4
           TRAP      #1
           MOVE.L    D4,D0
           BRA       PRT_ERR
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 WRKSP_MSG DC.B      0,14,'Workspace Size'
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 OPC_MSG   DC.B      0,24,'Suppress opcode ? (Y/N) '
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DATA_MSG  DC.B      0,12,$0A,'Data areas',$0A
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXAMINE   JSR       RDSTRING
           ADDQ.W    #2,A1
           JSR       READHEX
@@ -1663,6 +2033,8 @@ ST_TP     MOVE.L    A0,(A1)
           MOVE.L    A0,IM_SSP(A6)
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 GET_SIZE  MOVE.L    D4,-(A7)
           LEA       SIZMSG,A1
           MOVE.W    UT_MTEXT,A2
@@ -1691,8 +2063,13 @@ GTSIZ_END
           MOVE.B    D4,D1
           MOVE.L    (A7)+,D4
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 SIZMSG    DC.B      0,15,'Size ? (B,W,L) ',0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 FILL      MOVEQ     #10,D1
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3
@@ -1723,6 +2100,8 @@ FILL_L    MOVE.L    D1,(A4)+
 FILL_END  BRA       MAIN_2
 WITHMSG   DC.B      0,4,'With'
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 COPY      MOVEQ     #10,D1
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3
@@ -1751,6 +2130,8 @@ COPY_D_LP MOVE.B    -(A4),-(A5)
 COPY_END  BRA       MAIN_2
 TO_MSG    DC.B      0,2,'To'
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 VERSION   LEA       JOBSMSG,A1
           MOVE.W    UT_MTEXT,A2
           JSR       (A2)
@@ -1836,13 +2217,24 @@ ENDJ1     LEA       VER_MSG,A1
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3
           BRA       MAIN_1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 JOBSMSG   DC.B      0,30,10,'Job ID    Owner    Prior Name'
           DS.W      0
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 VER_MSG   DC.B      0,15,10,'QDOS Version: '
           DS.W      0
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 FREEMSG   DC.B      0,15,'  Free Memory: ',0
           DS.W      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 HELP      MOVEQ     #SD_CURS,D0
           TRAP      #3
           MOVE.L    PROMPTWND(A6),A0
@@ -1862,10 +2254,26 @@ HELP      MOVEQ     #SD_CURS,D0
           TRAP      #3
           BRA       DP_END
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 HELPMSG1  DC.W      HLP1_END-*-2
           DC.B      'Press any key to continue'
 HLP1_END  EQU       *
           DS.W      0
+
+*--------------------------------------------------------------------
+* The text below is the HELP message displayed when F1 is pressed. If
+* you are reading this on a non-QL computer then it is possible that
+* some characters don't appear correctly.
+*
+* The Copyright message has a CHR$(127) or (C) at the start.
+* The CHANGE xxxx POINTER messages have the arrow keys as LEFT, RIGHT,
+* UP and DOWN at the start of each message. CHR$(188, 189, 190, 191).
+* 
+*--------------------------------------------------------------------
+* DO NOT ATTEMPT TO EDIT THOSE CHARACTERS ON A NON_QL COMPUTER AS YOU
+* WILL CORRUPT THE CODE WHEN RUNNING ON A QL COMPUTER OR EMULATOR!!!!
+*--------------------------------------------------------------------
 HELPMSG2  DC.W      HLP2_END-*-2
           DC.B      '                             QL MULTIMON V2.1',10
           DC.B      '                        1986, 87 BY JAN BREDENBEEK',10,10

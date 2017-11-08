@@ -28,29 +28,43 @@
 
           DATA      0
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 ADD_WRK   MOVE.L    WRKSPTR(A6),A1
           CMPA.L    WRK_END(A6),A1
           BGE.S     WRKSP_ERR
           MOVE.L    D1,(A1)+
           MOVE.L    A1,WRKSPTR(A6)
           RTS
+
 WRKSP_ERR ST        WRKSPOV(A6)
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 BTOHEXS   TST.B     D1
           BPL.S     BTOHEX
           MOVE.B    #'-',(A0)+
           NEG.B     D1
 BTOHEX    MOVE.B    #'$',(A0)+
           BRA.S     CN_HEXB
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 WTOHEXS   TST.W     D1
           BPL.S     WTOHEX
           MOVE.B    #'-',(A0)+
           NEG.W     D1
 WTOHEX    MOVE.B    #'$',(A0)+
           BRA.S     CN_HEXW
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 LTOHEX    MOVE.B    #'$',(A0)+
           BRA.S     CN_HEXL
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CN_ADDR   MOVEQ     #5,D0
           TST.B     RELMOD(A6)
           BEQ.S     CN_HEX
@@ -60,10 +74,19 @@ CN_ADDR   MOVEQ     #5,D0
           BCC.S     CN_HEX
           SUB.L     BASE_PNT(A6),D1
           BRA.S     CN_HEX
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CN_HEXB   MOVEQ     #2,D0
           BRA.S     CN_HEX
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CN_HEXW   MOVEQ     #4,D0
           BRA.S     CN_HEX
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CN_HEXL   MOVEQ     #8,D0
 CN_HEX    MOVEM.L   D1-D3,-(A7)
           MOVE.B    D0,D3
@@ -82,6 +105,8 @@ CN_STORE  ADDI.B    #'0',D2
           MOVEM.L   (A7)+,D1-D3
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DEST_EA   MOVEQ     #7,D0
           MOVE.W    D7,D5
           ROL.W     D0,D5
@@ -101,6 +126,8 @@ DEST_CMP  CMP.B     D0,D6
 EA_ERROR  MOVE.B    #'?',(A0)+
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 GET_MR    MOVEQ     #$07,D5
           MOVEQ     #$38,D6
           AND.B     D7,D5
@@ -110,6 +137,9 @@ GET_MR    MOVEQ     #$07,D5
           BNE.S     L702DE
           ADD.B     D5,D6
 L702DE    RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_DATA   BSR.S     GET_MR
           CMPI.B    #$01,D6
           BEQ.S     EA_ERROR
@@ -142,6 +172,9 @@ EA_DEC_1  CMPI.B    #11,D6
           LSL.W     #1,D6
           MOVE.W    EA_TABLE(PC,D6.W),A1
           JMP       EA_TABLE(PC,A1.W)
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_TABLE  DC.W      EA_0-EA_TABLE
           DC.W      EA_1-EA_TABLE
           DC.W      EA_2-EA_TABLE
@@ -155,11 +188,19 @@ EA_TABLE  DC.W      EA_0-EA_TABLE
           DC.W      EA_A-EA_TABLE
           DC.W      EA_B-EA_TABLE
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 GT_SIZE   MOVE.B    #'.',(A0)+
           MOVE.B    SIZETAB(PC,D4.W),(A0)+
           LEA       OPR_FLD(A6),A0
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 SIZETAB   DC.B      'BWL',0
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 SIZE_WL   MOVE.B    #'.',(A0)+
           MOVEQ     #'W',D0
           BTST      #6,D7
@@ -169,6 +210,8 @@ SWL_2     MOVE.B    D0,(A0)+
           LEA       OPR_FLD(A6),A0
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 SECNDREG  MOVE.W    D7,D5
           ROL.W     #7,D5
           ANDI.B    #7,D5
@@ -178,32 +221,62 @@ EA_1      MOVE.B    #'A',(A0)+
 ENTREGNR  ADDI.B    #'0',D5
           MOVE.B    D5,(A0)+
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_4      MOVE.B    #'-',(A0)+
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_2      MOVE.B    #'(',(A0)+
           BSR.S     EA_1
           MOVE.B    #')',(A0)+
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_3      BSR.S     EA_2
           MOVE.B    #'+',(A0)+
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_5      JSR       ADV_W
           JSR       WTOHEXS
           BRA.S     EA_2
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_6      JSR       ADV_W
           JSR       BTOHEXS
           MOVE.B    #'(',(A0)+
           BSR.S     EA_1
           MOVE.B    #',',(A0)+
           BRA.S     EA_INDEX
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_7      JSR       ADV_W
           EXT.L     D1
           BRA.S     EA_ADDR
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_8      JSR       ADV_L
           BRA.S     EA_ADDR
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_9      MOVE.L    A4,A1
           JSR       ADV_W
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_9A     EXT.L     D1
           ADD.L     A1,D1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_ADDR   MOVEQ     #'$',D0
           TST.B     DISMOD(A6)
           BLT.S     EA_BP
@@ -223,6 +296,9 @@ EA_A_LP   CMPA.L    WRKSPTR(A6),A1
 NEW_LABEL JSR       ADD_WRK
 ST_LABEL  MOVE.B    D0,(A0)+
           JMP       CN_ADDR
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_BP     MOVE.L    D1,D2
           BSR.S     ST_LABEL
           CMP.L     D1,D2
@@ -230,7 +306,13 @@ EA_BP     MOVE.L    D1,D2
           LEA       BPMSG,A1
           JSR       COPY_LP
 EA_BP_EN  RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 BPMSG     DC.B      '(BP)',0,0
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_A      JSR       ADV_W
           MOVE.W    D1,-(A7)
           EXT.W     D1
@@ -257,6 +339,9 @@ INDEXREG  MOVE.B    D0,(A0)+
 INDXSIZE  MOVE.B    D0,(A0)+
           MOVE.B    #')',(A0)+
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_B      BSR.S     ADVANCE
           MOVE.B    #'#',(A0)+
           MOVE.B    D4,D0
@@ -265,12 +350,16 @@ EA_B      BSR.S     ADVANCE
           BEQ       WTOHEX
           BRA       LTOHEX
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 ALIGN     MOVE.L    A4,D0
           ADDQ.L    #1,D0
           BCLR      #0,D0
           MOVE.L    D0,A4
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 ADVANCE   CMPI.B    #2,D4
           BEQ.S     ADV_L
           MOVEQ     #0,D1
@@ -286,32 +375,58 @@ ADV_2     EXG       A0,A5
           EXG       A0,A5
 COPY_END  RTS
 
+*--------------------------------------------------------------------
+* Code to scan through the current (list of) instructions at (A1)
+* Looking for the entry in the list following the next CHR$(0).
+* All entries are zero terminated.
+* D1.W Holds the actual entry in the list that we want to extract.
+*--------------------------------------------------------------------
 NXTENTRY  TST.B     (A1)+
           BNE.S     NXTENTRY
 DIS_INDEX DBF       D1,NXTENTRY
+
+*--------------------------------------------------------------------
+* Copy an entry from a list of zero terminated strings to the buffer
+* in (A0). The list is at (A1). 
+*--------------------------------------------------------------------
 COPY_LP   MOVE.B    (A1)+,D0
           BEQ.S     COPY_END
           MOVE.B    D0,(A0)+
           BRA.S     COPY_LP
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CONDITION MOVE.W    D7,D1
           ANDI.W    #$0F00,D1
           LSR.W     #7,D1
           MOVE.B    0(A1,D1.W),(A0)+
           MOVE.B    1(A1,D1.W),(A0)+
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CONDTAB1  DC.B      'T F HILSCCCSNEEQVCVSPLMIGELTGTLE'
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 CONDTAB2  DC.B      'RASRHILSCCCSNEEQVCVSPLMIGELTGTLE'
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 FIND_LBL  MOVE.L    LBL_TBL(A6),A1
 FINDLBL2  CMPA.L    WRKSPTR(A6),A1
           BGE.S     LBL_NOTF
           CMPA.L    (A1)+,A4
           BNE.S     FINDLBL2
           RTS
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 LBL_NOTF  MOVEQ     #-7,D0
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DISASSEM  LEA       DISBUF(A6),A0
           MOVE.L    A0,A1
           MOVEQ     #$20,D1
@@ -375,6 +490,7 @@ B_NEXT    CMPA.L    D7,A4
           BSR       FIND_LBL
           DBEQ      D5,BYTE_LOOP
 B_END     RTS
+
 DATA_WORD JSR       ADV_W
           JSR       WTOHEX
           CMPA.L    D7,A4
@@ -396,6 +512,7 @@ DIS_INST  JSR       ADV_W
           ROL.W     #5,D1
           MOVE.W    LINETAB(PC,D1.W),D1
           JMP       LINETAB(PC,D1.W)
+
 LINETAB   DC.W      LINE0-LINETAB
           DC.W      LINE1-LINETAB
           DC.W      LINE2-LINETAB
@@ -444,10 +561,12 @@ L70672    LEA       OPR_FLD(A6),A0
           MOVE.W    D4,D1
           LEA       MN_SRCCR,A1
           JMP       DIS_INDEX
+
 L0_IMM    JSR       GT_SIZE
           JSR       EA_B
           MOVE.B    #',',(A0)+
           JMP       EA_DALT
+
 TST_MOVEP JSR       GET_MR
           SUBQ.B    #1,D6
           BEQ.S     D_MOVEP
@@ -466,6 +585,7 @@ L0_COMMA  MOVE.B    #',',(A0)+
           TST.B     D4
           BEQ       EA_DATA
           JMP       EA_DALT
+
 D_MOVEP   LEA       MN_MOVEP,A1
           JSR       COPY_LP
           JSR       SIZE_WL
@@ -474,6 +594,7 @@ D_MOVEP   LEA       MN_MOVEP,A1
           JSR       EA_5
           MOVE.B    #',',(A0)+
           JMP       SECNDREG
+
 MOVEP_2   JSR       SECNDREG
           MOVE.B    #',',(A0)+
           MOVEQ     #7,D5
@@ -510,6 +631,7 @@ LINE4     BTST      #8,D7
           JSR       EA_DATA
           MOVE.B    #',',(A0)+
           JMP       SECNDREG
+
 D_LEA     JSR       EA_CTRL
           BRA       SECND_ADD
 L4_MISC   MOVE.W    D7,D1
@@ -523,6 +645,7 @@ L4_MISC   MOVE.W    D7,D1
           JSR       DIS_INDEX
           JSR       GT_SIZE
           JMP       EA_DALT
+
 MOVE_SR   SUBQ.B    #1,D1
           BEQ       ILL_INST
           LEA       MN_MOVE,A1
@@ -535,12 +658,14 @@ MOVE_SR   SUBQ.B    #1,D1
           JSR       DIS_INDEX
           MOVE.B    #',',(A0)+
           JMP       EA_DALT
+
 TO_SR     MOVE.W    D1,D4
           JSR       EA_DATA
           MOVE.B    #',',(A0)+
           MOVE.W    D4,D1
           LEA       MN_SRCCR,A1
           JMP       DIS_INDEX
+
 L4_2      SUBQ.B    #1,D1
           BEQ       D_TST
           BGT       D_MOVEM2
@@ -551,6 +676,7 @@ L4_2      SUBQ.B    #1,D1
           JSR       COPY_LP
           LEA       OPR_FLD(A6),A0
           JMP       EA_DALT
+
 SWAP_PEA  MOVEQ     #$38,D0
           AND.B     D7,D0
           BNE.S     D_PEA
@@ -562,6 +688,7 @@ D_PEA     LEA       MN_PEA,A1
           JSR       COPY_LP
           LEA       OPR_FLD(A6),A0
           JMP       EA_CTRL
+
 EXT_MOVEM JSR       GET_MR
           LEA       MN_EXT,A1
           TST.B     D6
@@ -588,6 +715,7 @@ D_MOVEM1  BSR       REGLIST
           CMPI.B    #8,D6
           BGT       EA_ERROR
 D_MOVEM3  JMP       EA_DECODE
+
 D_TST     LEA       MN_ILLEG,A1
           CMPI.B    #$FC,D7
           BEQ       COPY_LP
@@ -597,10 +725,12 @@ D_TST     LEA       MN_ILLEG,A1
           JSR       COPY_LP
           JSR       GT_SIZE
           JMP       EA_DALT
+
 D_TAS     LEA       MN_TAS,A1
           JSR       COPY_LP
           LEA       OPR_FLD(A6),A0
           JMP       EA_DALT
+
 D_MOVEM2  SUBQ.B    #1,D1
           BNE       L4_E
           TST.B     D7
@@ -639,6 +769,7 @@ RL_LP1    BTST      D0,D1
           LSR.B     #1,D1
           BNE.S     RL_LP1
 RL_END    RTS
+
 RL_SET    MOVE.B    D2,(A0)+
           MOVE.B    D3,(A0)+
           LSR.B     #1,D1
@@ -668,6 +799,7 @@ L4_E      MOVE.B    D7,D1
           MOVEQ     #$0F,D1
           AND.B     D7,D1
           JMP       BTOHEX
+
 D_LINK    SUBQ.B    #1,D1
           BNE.S     MOVE_USP
           LEA       MN_LINK,A1
@@ -680,10 +812,12 @@ D_UNLK    JSR       COPY_LP
           BTST      #3,D7
           BEQ.S     LINK_DSP
           RTS
+
 LINK_DSP  MOVE.B    #',',(A0)+
           MOVE.B    #'#',(A0)+
           JSR       ADV_W
           JMP       WTOHEXS
+
 MOVE_USP  SUBQ.B    #1,D1
           BNE.S     D_4E7X
           LEA       MN_MOVE,A1
@@ -695,11 +829,13 @@ MOVE_USP  SUBQ.B    #1,D1
           MOVE.B    #$2C,(A0)+
 COPY_USP  LEA       MN_USP,A1
           JMP       COPY_LP
+
 L709A2    BSR.S     COPY_USP
           MOVE.B    #$2C,(A0)+
 ADDREG    MOVEQ     #$07,D5
           AND.B     D7,D5
           JMP       EA_1
+
 D_4E7X    TST.B     D7
           BMI.S     L709DA
           MOVEQ     #$0F,D1
@@ -717,12 +853,14 @@ D_4E7X    TST.B     D7
           MOVEQ     #$01,D4
           JSR       EA_B
 L709D8    RTS
+
 L709DA    MOVEQ     #$01,D1
           AND.B     D4,D1
           LEA       MN_JSR,A1
           JSR       DIS_INDEX
           LEA       OPR_FLD(A6),A0
           JMP       EA_CTRL
+
 QUICKDATA MOVE.B    #$23,(A0)+
           MOVE.W    D7,D1
           ANDI.W    #$0E00,D1
@@ -733,6 +871,7 @@ L709FE    ADDI.B    #$30,D1
           MOVE.B    D1,(A0)+
           MOVE.B    #$2C,(A0)+
           RTS
+
 LINE5     CMPI.B    #$03,D4
           BEQ.S     L70A2C
           LEA       MN_ADDQ,A1
@@ -743,6 +882,7 @@ L70A1E    JSR       COPY_LP
           JSR       GT_SIZE
           BSR.S     QUICKDATA
           JMP       EA_ALT
+
 L70A2C    LEA       CONDTAB1,A1
           JSR       GET_MR
           SUBQ.B    #1,D6
@@ -754,6 +894,7 @@ L70A2C    LEA       CONDTAB1,A1
           JSR       EA_0
           MOVE.B    #',',(A0)+
           JMP       EA_9
+
 D_SCC     MOVE.B    #'S',(A0)+
           JSR       CONDITION
           LEA       OPR_FLD(A6),A0
@@ -770,6 +911,7 @@ LINE6     MOVE.B    #'B',(A0)+
           MOVE.L    A4,A1
           EXT.W     D1
           JMP       EA_9A
+
 BR_LONG   LEA       OPR_FLD(A6),A0
           JMP       EA_9
 
@@ -831,6 +973,7 @@ SBCD_DATA JSR       (A2)
           ROL.W     #7,D5
           MOVE.B    #',',(A0)+
           JMP       (A2)
+
 MUL_DIV   MOVEQ     #0,D1
           MOVEQ     #1,D4
           BTST      #8,D7
@@ -873,11 +1016,13 @@ SECND_ADD MOVE.B    #',',(A0)+
           ANDI.W    #$0E00,D5
           ROL.W     #7,D5
           JMP       EA_1
+
 SUB_MEM   JSR       DIS_INDEX
           JSR       GT_SIZE
           JSR       EA_DECODE
           MOVE.B    #',',(A0)+
           JMP       SECNDREG
+
 SUB_DX    LEA       EA_MALT,A2
 SUB_DX1   JSR       DIS_INDEX
           JSR       GT_SIZE
@@ -923,6 +1068,7 @@ SH_REG    MOVE.B    #'D',(A0)+
           ADDI.B    #'0',D0
           MOVE.B    D0,(A0)+
           RTS
+
 SH_MEM    MOVE.W    D7,D1
           ANDI.W    #$0600,D1
           ROL.W     #7,D1
@@ -930,6 +1076,7 @@ SH_MEM    MOVE.W    D7,D1
           BSR.S     DIRECTION
           LEA       OPR_FLD(A6),A0
           JMP       EA_MALT
+
 DIRECTION MOVEQ     #'R',D0
           BTST      #8,D7
           BEQ.S     DIR_MOVE
@@ -937,6 +1084,8 @@ DIRECTION MOVEQ     #'R',D0
 DIR_MOVE  MOVE.B    D0,(A0)+
           RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 MN_ILL    DC.B      '*ILLEGAL OPCODE*',0
 MN_SRCCR  DC.B      'CCR',0,'SR',0
 MN_USP    DC.B      'USP',0
