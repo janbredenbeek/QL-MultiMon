@@ -1417,23 +1417,33 @@ DP_MNEM   MOVE.W    D4,D2
           TRAP      #3
           CMPI.B    #$1B,D1
           BNE.S     DP_LOOP
-DP_END    MOVE.L    AUXWND(A6),A0
-          MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          MOVE.L    CMDWND(A6),A0
-          MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          BRA       MAIN_LOOP
-
-ESC_MSG   MOVE.L    PROMPTWND(A6),A0
-          MOVEQ     #-1,D3
-          MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          LEA       ESCPROMPT,A1
-          MOVE.W    UT_MTEXT,A2
-          JMP       (A2)
 
 *--------------------------------------------------------------------
+* Clear the AUX and COMMAND WINDOWS before skipping back to the
+* main loop.
+*--------------------------------------------------------------------
+DP_END    MOVE.L    AUXWND(A6),A0   ; Use the AUX WINDOW
+          MOVEQ     #SD_CLEAR,D0    ; Clear it
+          TRAP      #3
+          MOVE.L    CMDWND(A6),A0   ; Use the COMMAND WINDOW
+          MOVEQ     #SD_CLEAR,D0    ; Clear it
+          TRAP      #3
+          BRA       MAIN_LOOP       ; Go around again
+
+*--------------------------------------------------------------------
+* Print a message inviting the user to press ESC to quit or any other
+* key to continue. This uses the PROMPT WINDOW.
+*--------------------------------------------------------------------
+ESC_MSG   MOVE.L    PROMPTWND(A6),A0    ; Use the PROMPT window
+          MOVEQ     #-1,D3
+          MOVEQ     #SD_CLEAR,D0    ; Clear it
+          TRAP      #3
+          LEA       ESCPROMPT,A1    ; Any key to continue...
+          MOVE.W    UT_MTEXT,A2
+          JMP       (A2)            ; Print it
+
+*--------------------------------------------------------------------
+* And this is the prompt message used above.
 *--------------------------------------------------------------------
 ESCPROMPT DC.W      42
           DC.B      'Press any key to continue or <ESC> to exit'
@@ -1499,6 +1509,7 @@ MD3       MOVE.L    D1,A4
           CMPI.B    #$1B,D1
           BNE.S     MD_PAGE
           BRA       DP_END
+
 DO_MEM    MOVE.L    A4,D1
           LEA       DISBUF(A6),A0
           JSR       CN_ADDR
@@ -1882,6 +1893,7 @@ WRKSP_ERR MOVE.L    CMDWND(A6),A0
           BRA       MAIN_1
 
 *--------------------------------------------------------------------
+* An error mesage for workspace overflow conditions.
 *--------------------------------------------------------------------
 WRKERRMSG DC.B      0,18,'Workspace Overflow'
 
@@ -1931,10 +1943,12 @@ DIS_QUIT  MOVE.L    D0,D4
           BRA       PRT_ERR
 
 *--------------------------------------------------------------------
+* Prompt message to ask for a (new) workspace size.
 *--------------------------------------------------------------------
 WRKSP_MSG DC.B      0,14,'Workspace Size'
 
 *--------------------------------------------------------------------
+* Prompt message to asik if the opcode should be suppressed or not.
 *--------------------------------------------------------------------
 OPC_MSG   DC.B      0,24,'Suppress opcode ? (Y/N) '
 
@@ -2065,6 +2079,7 @@ GTSIZ_END
           RTS
 
 *--------------------------------------------------------------------
+* Size prompt.
 *--------------------------------------------------------------------
 SIZMSG    DC.B      0,15,'Size ? (B,W,L) ',0
 
@@ -2131,6 +2146,8 @@ COPY_END  BRA       MAIN_2
 TO_MSG    DC.B      0,2,'To'
 
 *--------------------------------------------------------------------
+* V - Version command. Fills the output window with details of all
+* the running jobs in the system.
 *--------------------------------------------------------------------
 VERSION   LEA       JOBSMSG,A1
           MOVE.W    UT_MTEXT,A2
@@ -2219,40 +2236,44 @@ ENDJ1     LEA       VER_MSG,A1
           BRA       MAIN_1
 
 *--------------------------------------------------------------------
+* Headings for the V command when displaying job details.
 *--------------------------------------------------------------------
 JOBSMSG   DC.B      0,30,10,'Job ID    Owner    Prior Name'
           DS.W      0
 
 *--------------------------------------------------------------------
+* HEadings for the V command when displaying the QDOS version.
 *--------------------------------------------------------------------
 VER_MSG   DC.B      0,15,10,'QDOS Version: '
           DS.W      0
 
 *--------------------------------------------------------------------
+* HEadings for the V command when displaying free memory.
 *--------------------------------------------------------------------
 FREEMSG   DC.B      0,15,'  Free Memory: ',0
           DS.W      0
 
 *--------------------------------------------------------------------
+* F1 - Help Command.
 *--------------------------------------------------------------------
-HELP      MOVEQ     #SD_CURS,D0
+HELP      MOVEQ     #SD_CURS,D0     ; Enable the cursor
           TRAP      #3
-          MOVE.L    PROMPTWND(A6),A0
-          MOVEQ     #SD_CLEAR,D0
+          MOVE.L    PROMPTWND(A6),A0    ; In the PROMPT WINDOW
+          MOVEQ     #SD_CLEAR,D0    ; And clear the screen
           TRAP      #3
-          LEA       HELPMSG1,A1
+          LEA       HELPMSG1,A1     ; "Continue" message
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          MOVE.L    AUXWND(A6),A0
-          MOVEQ     #SD_CLEAR,D0
+          JSR       (A2)            ; Print it.
+          MOVE.L    AUXWND(A6),A0   ; Use the AUX WINDOW for help
+          MOVEQ     #SD_CLEAR,D0    ; Clear the AUX WINDOW
           TRAP      #3
-          LEA       HELPMSG2,A1
+          LEA       HELPMSG2,A1     ; The full help text
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          MOVE.L    CMDWND(A6),A0
-          MOVEQ     #IO_FBYTE,D0
+          JSR       (A2)            ; Print it
+          MOVE.L    CMDWND(A6),A0   ; Watch the COMMAND WINDOW
+          MOVEQ     #IO_FBYTE,D0    ; for a key press
           TRAP      #3
-          BRA       DP_END
+          BRA       DP_END          ; Clear windows and renter main loop
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------

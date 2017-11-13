@@ -404,10 +404,14 @@ CONDITION MOVE.W    D7,D1
           RTS
 
 *--------------------------------------------------------------------
+* Condition codes table. Two bytes for each condition code. DBRA is
+* actually DBF in this table.
 *--------------------------------------------------------------------
 CONDTAB1  DC.B      'T F HILSCCCSNEEQVCVSPLMIGELTGTLE'
 
 *--------------------------------------------------------------------
+* More condition codes. These are for BRA, BSR and the rest are the 
+* Bcc codes.
 *--------------------------------------------------------------------
 CONDTAB2  DC.B      'RASRHILSCCCSNEEQVCVSPLMIGELTGTLE'
 
@@ -421,6 +425,7 @@ FINDLBL2  CMPA.L    WRKSPTR(A6),A1
           RTS
 
 *--------------------------------------------------------------------
+* NOT FOUND (-7) Error return.
 *--------------------------------------------------------------------
 LBL_NOTF  MOVEQ     #-7,D0
           RTS
