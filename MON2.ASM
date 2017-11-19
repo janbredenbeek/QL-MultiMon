@@ -41,69 +41,93 @@ WRKSP_ERR ST        WRKSPOV(A6)
           RTS
 
 *--------------------------------------------------------------------
+* Signed byte to Hexadecimal.
 *--------------------------------------------------------------------
-BTOHEXS   TST.B     D1
-          BPL.S     BTOHEX
-          MOVE.B    #'-',(A0)+
-          NEG.B     D1
-BTOHEX    MOVE.B    #'$',(A0)+
-          BRA.S     CN_HEXB
+BTOHEXS   TST.B     D1              ; Test sign
+          BPL.S     BTOHEX          ; Skip  if positive
+          MOVE.B    #'-',(A0)+      ; Must be negative
+          NEG.B     D1              ; ABS(D1)
+BTOHEX    MOVE.B    #'$',(A0)+      ; Indicate Hexadecimal
+          BRA.S     CN_HEXB         ; Convert Byte to Hexadecimal
 
 *--------------------------------------------------------------------
+* Signed word to Hexadecimal.
 *--------------------------------------------------------------------
-WTOHEXS   TST.W     D1
-          BPL.S     WTOHEX
-          MOVE.B    #'-',(A0)+
-          NEG.W     D1
-WTOHEX    MOVE.B    #'$',(A0)+
-          BRA.S     CN_HEXW
+WTOHEXS   TST.W     D1              ; Test sign
+          BPL.S     WTOHEX          ; Skip if positive
+          MOVE.B    #'-',(A0)+      ; Must be negative
+          NEG.W     D1              ; ABS(D1)
+WTOHEX    MOVE.B    #'$',(A0)+      ; Indicate Hexadecimal
+          BRA.S     CN_HEXW         ; Convert word to Hexadecimal
 
 *--------------------------------------------------------------------
+* Long to Hexadecimal - assumed always positive?
 *--------------------------------------------------------------------
-LTOHEX    MOVE.B    #'$',(A0)+
-          BRA.S     CN_HEXL
+LTOHEX    MOVE.B    #'$',(A0)+      ; Indicate Hexadecimal
+          BRA.S     CN_HEXL         ; Convert long word to Hexadecimal
 
 *--------------------------------------------------------------------
+* Convert an address to 5, yes 5, Hexadecimal digits. See readme file
+* for why this is, and how it might be updated to cover modern QL
+* memory sizes, emulators etc.
 *--------------------------------------------------------------------
-CN_ADDR   MOVEQ     #5,D0
-          TST.B     RELMOD(A6)
-          BEQ.S     CN_HEX
-          CMP.L     BASE_PNT(A6),D1
-          BCS.S     CN_HEX
-          CMP.L     TOP_PNT(A6),D1
+CN_ADDR   MOVEQ     #5,D0           ; Only 5 digits permitted
+          TST.B     RELMOD(A6)      ; Relative mode?
+          BEQ.S     CN_HEX          ; No, just do the Hexadecimal address
+          CMP.L     BASE_PNT(A6),D1 ; Yes, Adjust to a relative offset
+          BCS.S     CN_HEX          ; but only if within the range of
+          CMP.L     TOP_PNT(A6),D1  ; BASE_PNT to TOP_PNT.
           BCC.S     CN_HEX
-          SUB.L     BASE_PNT(A6),D1
-          BRA.S     CN_HEX
+          SUB.L     BASE_PNT(A6),D1 ; Make relative to BASE_PNT
+          BRA.S     CN_HEX          ; Print 5 Hexadecimal digits
 
 *--------------------------------------------------------------------
+* Positive byte to Hexadecimal.
 *--------------------------------------------------------------------
-CN_HEXB   MOVEQ     #2,D0
-          BRA.S     CN_HEX
+CN_HEXB   MOVEQ     #2,D0           ; Only 2 hex digits in a byte
+          BRA.S     CN_HEX          ; Convert them
 
 *--------------------------------------------------------------------
+* Positive word to Hexadecimal.
 *--------------------------------------------------------------------
-CN_HEXW   MOVEQ     #4,D0
-          BRA.S     CN_HEX
+CN_HEXW   MOVEQ     #4,D0           ; There are 4 hex digits in a word
+          BRA.S     CN_HEX          ; Convert them
 
 *--------------------------------------------------------------------
+* Positive long word to Hexadecimal.
 *--------------------------------------------------------------------
-CN_HEXL   MOVEQ     #8,D0
-CN_HEX    MOVEM.L   D1-D3,-(A7)
-          MOVE.B    D0,D3
-          ADDA.W    D0,A0
-CN_LOOP   MOVEQ     #$0F,D2
-          AND.B     D1,D2
-          CMPI.B    #10,D2
-          BLT.S     CN_STORE
-          ADDQ.B    #7,D2
-CN_STORE  ADDI.B    #'0',D2
-          MOVE.B    D2,-(A0)
-          LSR.L     #4,D1
-          SUBQ.B    #1,D3
-          BNE.S     CN_LOOP
-          ADDA.W    D0,A0
-          MOVEM.L   (A7)+,D1-D3
-          RTS
+CN_HEXL   MOVEQ     #8,D0           ; There are 8 hex digits in a long
+
+
+*--------------------------------------------------------------------
+* Routine to convert D1.B.W.L to D0 Hexadecimal characters. For byte,
+* word or long this is 2, 4 or 8 characters. For an address, only the
+* lower 5 digits are converted. See the readme file & CN_ADDR above.
+* The converted digits are stored in a buffer at (A0).
+*--------------------------------------------------------------------
+CN_HEX    MOVEM.L   D1-D3,-(A7)     ; Save workers
+          MOVE.B    D0,D3           ; Counter of digits in D3.B
+          ADDA.W    D0,A0           ; Point to END of buffer
+
+*--------------------------------------------------------------------
+* Work backwards in the buffer, converting the lowest byte of D1 as
+* we go. Only D3.B characters are converted, or D3.B/2 bytes of the
+* value in D1.B.W.L.
+*--------------------------------------------------------------------
+CN_LOOP   MOVEQ     #$0F,D2         ; Mask of one nibble
+          AND.B     D1,D2           ; D2.B = Lowest nibble
+          CMPI.B    #10,D2          ; Still a digit?
+          BLT.S     CN_STORE        ; Yes, store the digit
+          ADDQ.B    #7,D2           ; No, add offset to letters
+
+CN_STORE  ADDI.B    #'0',D2         ; ASCIIfy the digit/letter
+          MOVE.B    D2,-(A0)        ; And store in the buffer
+          LSR.L     #4,D1           ; Ready the next highest nibble
+          SUBQ.B    #1,D3           ; One less digit to convert
+          BNE.S     CN_LOOP         ; Do another if more to do
+          ADDA.W    D0,A0           ; A0 points to the final hex char
+          MOVEM.L   (A7)+,D1-D3     ; Restore the workers
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
@@ -144,6 +168,9 @@ EA_DATA   BSR.S     GET_MR
           CMPI.B    #$01,D6
           BEQ.S     EA_ERROR
           BRA.S     EA_DEC_1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_MALT   BSR.S     GET_MR
           CMPI.B    #$08,D6
           BGT.S     EA_ERROR
@@ -151,6 +178,9 @@ EA_MEM    BSR.S     GET_MR
           CMPI.B    #$02,D6
           BLT.S     EA_ERROR
           BRA.S     EA_DEC_1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_CTRL   BSR.S     GET_MR
           CMPI.B    #$02,D6
           BEQ.S     EA_DEC_1
@@ -159,6 +189,9 @@ EA_CTRL   BSR.S     GET_MR
           CMPI.B    #$0A,D6
           BGT.S     EA_ERROR
           BRA.S     EA_DEC_1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_DALT   BSR.S     GET_MR
           CMPI.B    #1,D6
           BEQ.S     EA_ERROR
@@ -166,6 +199,9 @@ EA_ALT    BSR.S     GET_MR
           CMPI.B    #8,D6
           BGT.S     EA_ERROR
           BRA.S     EA_DEC_1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EA_DECODE BSR.S     GET_MR
 EA_DEC_1  CMPI.B    #11,D6
           BHI.S     EA_ERROR
@@ -174,6 +210,8 @@ EA_DEC_1  CMPI.B    #11,D6
           JMP       EA_TABLE(PC,A1.W)
 
 *--------------------------------------------------------------------
+* Table of pointers to Effective Address decoding routines based on
+* the mode of the Effective Address itself.
 *--------------------------------------------------------------------
 EA_TABLE  DC.W      EA_0-EA_TABLE
           DC.W      EA_1-EA_TABLE
@@ -189,90 +227,118 @@ EA_TABLE  DC.W      EA_0-EA_TABLE
           DC.W      EA_B-EA_TABLE
 
 *--------------------------------------------------------------------
+* Decodes the size for the instruction and adds it to the buffer at
+* (A0). D4.W holds the size to be converted.
 *--------------------------------------------------------------------
-GT_SIZE   MOVE.B    #'.',(A0)+
-          MOVE.B    SIZETAB(PC,D4.W),(A0)+
-          LEA       OPR_FLD(A6),A0
-          RTS
+GT_SIZE   MOVE.B    #'.',(A0)+      ; Buffer the dot
+          MOVE.B    SIZETAB(PC,D4.W),(A0)+  ; Buffer the size letter
+          LEA       OPR_FLD(A6),A0  ; Reset the buffer pointer
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
+* Table of instruction sizes indexed by D4.W from GT_SIZE above. 
 *--------------------------------------------------------------------
 SIZETAB   DC.B      'BWL',0
 
 *--------------------------------------------------------------------
+* Some instructions are not byte sized, so this deals with those that
+* are only permitted to be word or long. The destination buffer is
+* at (A0) and bit 6 of D7 holds the size indicator - 0 = Word, 1 =
+* long.
 *--------------------------------------------------------------------
-SIZE_WL   MOVE.B    #'.',(A0)+
-          MOVEQ     #'W',D0
-          BTST      #6,D7
-          BEQ.S     SWL_2
-          MOVEQ     #'L',D0
-SWL_2     MOVE.B    D0,(A0)+
-          LEA       OPR_FLD(A6),A0
-          RTS
+SIZE_WL   MOVE.B    #'.',(A0)+      ; Buffer the dot
+          MOVEQ     #'W',D0         ; Assume Word
+          BTST      #6,D7           ; But check anyway
+          BEQ.S     SWL_2           ; Yes, word skip
+          MOVEQ     #'L',D0         ; Bad guess, must be long
+SWL_2     MOVE.B    D0,(A0)+        ; Buffer the size letter
+          LEA       OPR_FLD(A6),A0  ; Reset buffer pointer
+          RTS                       ; Done
+
+*--------------------------------------------------------------------
+* Sets D5.B to be the register number for an Effective Address. This
+* is done when there are two Effective Addresses to be worked out. 
+* Bits 11-9 have the desired register number and this is rotated into
+* bits 2-0 then masked to get the desired register number.
+*--------------------------------------------------------------------
+SECNDREG  MOVE.W    D7,D5           ; Copy instruction word to D5
+          ROL.W     #7,D5           ; Shift bits 987 -> 210
+          ANDI.B    #7,D5           ; Mask out register number
+
+*--------------------------------------------------------------------
+* EA Mode 0 - Data Register Direct.                                Dn
+*--------------------------------------------------------------------
+EA_0      MOVE.B    #'D',(A0)+      ; D for Data Register Direct
+          BRA.S     ENTREGNR        ; Do the register number
+
+*--------------------------------------------------------------------
+* EA Mode 1 - Address Register Direct.                             An
+*--------------------------------------------------------------------
+EA_1      MOVE.B    #'A',(A0)+      ; A for Address Register Direct
+
+*--------------------------------------------------------------------
+* Add the register number which is held in D5.B.
+*--------------------------------------------------------------------
+ENTREGNR  ADDI.B    #'0',D5         ; ASCIIfy the register number
+          MOVE.B    D5,(A0)+        ; Buffer it
+          RTS                       ; Done
+
+*--------------------------------------------------------------------
+* EA Mode 4 - Address Register Indirect with Predecrement.      -(An)
+*--------------------------------------------------------------------
+EA_4      MOVE.B    #'-',(A0)+      ; Buffer the predecrement sign
+
+*--------------------------------------------------------------------
+* EA Mode 2 - Address Register Indirect.                         (An)
+*--------------------------------------------------------------------
+EA_2      MOVE.B    #'(',(A0)+      ; Buffer the bracket
+          BSR.S     EA_1            ; Buffer the Address Register
+          MOVE.B    #')',(A0)+      ; Close the bracket
+          RTS                       ; Done
+
+*--------------------------------------------------------------------
+* EA Mode 3 - Address Register Indirect with Postincrement.     (An)+
+*--------------------------------------------------------------------
+EA_3      BSR.S     EA_2            ; Buffer the (An) register
+          MOVE.B    #'+',(A0)+      ; Buffer the postincrement sign
+          RTS                       ; Done
+
+*--------------------------------------------------------------------
+* EA Mode 5 - Address Register Indirect with Displacement.     nn(An)
+*--------------------------------------------------------------------
+EA_5      JSR       ADV_W           ; Get the displacement word
+          JSR       WTOHEXS         ; Buffer signed hexadecimal word
+          BRA.S     EA_2            ; And the indirect address register
+
+*--------------------------------------------------------------------
+* EA Mode 6 - Address Register Indirect with Index.         nn(An,Rn)
+*--------------------------------------------------------------------
+EA_6      JSR       ADV_W           ; Get the displacement word
+          JSR       BTOHEXS         ; Buffer signed hexadecimal byte 
+          MOVE.B    #'(',(A0)+      ; Buffer the opening bracket
+          BSR.S     EA_1            ; Buffer the Address register
+          MOVE.B    #',',(A0)+      ; The comma
+          BRA.S     EA_INDEX        ; The index register
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
-SECNDREG  MOVE.W    D7,D5
-          ROL.W     #7,D5
-          ANDI.B    #7,D5
-EA_0      MOVE.B    #'D',(A0)+
-          BRA.S     ENTREGNR
-EA_1      MOVE.B    #'A',(A0)+
-ENTREGNR  ADDI.B    #'0',D5
-          MOVE.B    D5,(A0)+
-          RTS
+EA_7      JSR       ADV_W           ; Get the displacement word
+          EXT.L     D1              ; Make it long, sign extended
+          BRA.S     EA_ADDR         ; Skip
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
-EA_4      MOVE.B    #'-',(A0)+
+EA_8      JSR       ADV_L           ; Get the displacement long word
+          BRA.S     EA_ADDR         ; Skip
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
-EA_2      MOVE.B    #'(',(A0)+
-          BSR.S     EA_1
-          MOVE.B    #')',(A0)+
-          RTS
+EA_9      MOVE.L    A4,A1           ; ????
+          JSR       ADV_W           ; Get the displacement word
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
-EA_3      BSR.S     EA_2
-          MOVE.B    #'+',(A0)+
-          RTS
-
-*--------------------------------------------------------------------
-*--------------------------------------------------------------------
-EA_5      JSR       ADV_W
-          JSR       WTOHEXS
-          BRA.S     EA_2
-
-*--------------------------------------------------------------------
-*--------------------------------------------------------------------
-EA_6      JSR       ADV_W
-          JSR       BTOHEXS
-          MOVE.B    #'(',(A0)+
-          BSR.S     EA_1
-          MOVE.B    #',',(A0)+
-          BRA.S     EA_INDEX
-
-*--------------------------------------------------------------------
-*--------------------------------------------------------------------
-EA_7      JSR       ADV_W
-          EXT.L     D1
-          BRA.S     EA_ADDR
-
-*--------------------------------------------------------------------
-*--------------------------------------------------------------------
-EA_8      JSR       ADV_L
-          BRA.S     EA_ADDR
-
-*--------------------------------------------------------------------
-*--------------------------------------------------------------------
-EA_9      MOVE.L    A4,A1
-          JSR       ADV_W
-
-*--------------------------------------------------------------------
-*--------------------------------------------------------------------
-EA_9A     EXT.L     D1
+EA_9A     EXT.L     D1              ; Sign extended to long word
           ADD.L     A1,D1
 
 *--------------------------------------------------------------------
@@ -298,6 +364,7 @@ ST_LABEL  MOVE.B    D0,(A0)+
           JMP       CN_ADDR
 
 *--------------------------------------------------------------------
+* Bad parameter in working out an effective address. Oops!
 *--------------------------------------------------------------------
 EA_BP     MOVE.L    D1,D2
           BSR.S     ST_LABEL
@@ -308,37 +375,45 @@ EA_BP     MOVE.L    D1,D2
 EA_BP_EN  RTS
 
 *--------------------------------------------------------------------
+* Message to display when disassembling an instruction which has a
+* dubious effective address.
 *--------------------------------------------------------------------
 BPMSG     DC.B      '(BP)',0,0
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
-EA_A      JSR       ADV_W
-          MOVE.W    D1,-(A7)
-          EXT.W     D1
-          EXT.L     D1
-          ADD.L     A4,D1
-          SUBQ.L    #2,D1
+EA_A      JSR       ADV_W           ; Get the displacement word
+          MOVE.W    D1,-(A7)        ; Save worker
+          EXT.W     D1              ; Sign extend D1 to word
+          EXT.L     D1              ; Then to long word
+          ADD.L     A4,D1           ; ????
+          SUBQ.L    #2,D1           
           BSR.S     EA_ADDR
-          MOVE.W    (A7)+,D1
-          MOVE.B    #'(',(A0)+
-EA_INDEX  MOVEQ     #'D',D0
-          TST.W     D1
-          BPL.S     INDEXREG
-          MOVEQ     #'A',D0
-INDEXREG  MOVE.B    D0,(A0)+
-          ROL.W     #4,D1
-          ANDI.B    #7,D1
-          ADDI.B    #'0',D1
-          MOVE.B    D1,(A0)+
-          MOVE.B    #'.',(A0)+
-          MOVEQ     #'W',D0
-          TST.W     D1
-          BPL.S     INDXSIZE
-          MOVEQ     #'L',D0
-INDXSIZE  MOVE.B    D0,(A0)+
-          MOVE.B    #')',(A0)+
-          RTS
+          MOVE.W    (A7)+,D1        ; Restore worker
+          MOVE.B    #'(',(A0)+      ; Buffer a bracket
+
+*--------------------------------------------------------------------
+* Buffers the index register in those Effective Addresses that have
+* one - for example, called from EA Mode 6 above.
+*--------------------------------------------------------------------
+EA_INDEX  MOVEQ     #'D',D0         ; Assumes a Data index register
+          TST.W     D1              ; Correct?
+          BPL.S     INDEXREG        ; Yes, skip
+          MOVEQ     #'A',D0         ; Bad guess, it was an address
+
+INDEXREG  MOVE.B    D0,(A0)+        ; Buffer the index register type
+          ROL.W     #4,D1           ; Get the register number
+          ANDI.B    #7,D1           ; Mask it out
+          ADDI.B    #'0',D1         ; ASCIIIfy it
+          MOVE.B    D1,(A0)+        ; Buffer the index register number
+          MOVE.B    #'.',(A0)+      ; And a dot
+          MOVEQ     #'W',D0         ; Assume Word sized index register
+          TST.W     D1              ; Check anyway
+          BPL.S     INDXSIZE        ; Correct, skip
+          MOVEQ     #'L',D0         ; Bad guess, it was long sized
+INDXSIZE  MOVE.B    D0,(A0)+        ; Buffer the size letter
+          MOVE.B    #')',(A0)+      ; And close the brackets
+          RTS                       ; Done.
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
