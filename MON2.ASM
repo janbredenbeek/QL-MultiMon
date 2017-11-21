@@ -29,16 +29,19 @@
           DATA      0
 
 *--------------------------------------------------------------------
+* Checks if we have room in the workspace and if so, stored D1.L at
+* the current pointer which is then updated. If we have no room left
+* sets WRKSPOV(A6) to $FF to show we have a problem.
 *--------------------------------------------------------------------
-ADD_WRK   MOVE.L    WRKSPTR(A6),A1
-          CMPA.L    WRK_END(A6),A1
-          BGE.S     WRKSP_ERR
-          MOVE.L    D1,(A1)+
-          MOVE.L    A1,WRKSPTR(A6)
-          RTS
+ADD_WRK   MOVE.L    WRKSPTR(A6),A1  ; Work area current address
+          CMPA.L    WRK_END(A6),A1  ; Still ok?
+          BGE.S     WRKSP_ERR       ; Nope, skip to set error
+          MOVE.L    D1,(A1)+        ; Store D1 in work area
+          MOVE.L    A1,WRKSPTR(A6)  ; Update current address
+          RTS                       ; Done
 
-WRKSP_ERR ST        WRKSPOV(A6)
-          RTS
+WRKSP_ERR ST        WRKSPOV(A6)     ; Flag an error $FF
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Signed byte to Hexadecimal.
@@ -333,7 +336,7 @@ EA_8      JSR       ADV_L           ; Get the displacement long word
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
-EA_9      MOVE.L    A4,A1           ; ????
+EA_9      MOVE.L    A4,A1           ; Address being disassembled
           JSR       ADV_W           ; Get the displacement word
 
 *--------------------------------------------------------------------
@@ -386,15 +389,15 @@ EA_A      JSR       ADV_W           ; Get the displacement word
           MOVE.W    D1,-(A7)        ; Save worker
           EXT.W     D1              ; Sign extend D1 to word
           EXT.L     D1              ; Then to long word
-          ADD.L     A4,D1           ; ????
-          SUBQ.L    #2,D1           
+          ADD.L     A4,D1           ; A4 is the address being disassembled
+          SUBQ.L    #2,D1           ; ???? -> TODO
           BSR.S     EA_ADDR
           MOVE.W    (A7)+,D1        ; Restore worker
           MOVE.B    #'(',(A0)+      ; Buffer a bracket
 
 *--------------------------------------------------------------------
 * Buffers the index register in those Effective Addresses that have
-* one - for example, called from EA Mode 6 above.
+* one - for example, called from EA Modes 6 & A above.
 *--------------------------------------------------------------------
 EA_INDEX  MOVEQ     #'D',D0         ; Assumes a Data index register
           TST.W     D1              ; Correct?
@@ -426,29 +429,46 @@ EA_B      BSR.S     ADVANCE
           BRA       LTOHEX
 
 *--------------------------------------------------------------------
+* Make sure that the address in A4 is even. A4 is the pointer to the
+* instruction/address being disassembled.
 *--------------------------------------------------------------------
-ALIGN     MOVE.L    A4,D0
-          ADDQ.L    #1,D0
-          BCLR      #0,D0
-          MOVE.L    D0,A4
-          RTS
+ALIGN     MOVE.L    A4,D0           ; Copy address to D0
+          ADDQ.L    #1,D0           ; Increment
+          BCLR      #0,D0           ; Make even
+          MOVE.L    D0,A4           ; Copy back
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
 ADVANCE   CMPI.B    #2,D4
           BEQ.S     ADV_L
           MOVEQ     #0,D1
-ADV_W     BSR       ALIGN
-          MOVE.W    (A4)+,D1
-          MOVEQ     #4,D0
-          BRA.S     ADV_2
-ADV_L     BSR       ALIGN
-          MOVE.L    (A4)+,D1
-          MOVEQ     #8,D0
-ADV_2     EXG       A0,A5
-          JSR       CN_HEX
-          EXG       A0,A5
-COPY_END  RTS
+
+*--------------------------------------------------------------------
+* Fetch a word sized operand, offset etc from the next address in 
+* memory to be disassembled for the current instruction.
+*--------------------------------------------------------------------
+ADV_W     BSR       ALIGN           ; Make sure A4 is even
+          MOVE.W    (A4)+,D1        ; Fetch the desired word
+          MOVEQ     #4,D0           ; 4 hex characters required
+          BRA.S     ADV_2           ; Skip
+
+*--------------------------------------------------------------------
+* Fetch a long sized operand, offset etc from the next address in 
+* memory to be disassembled for the current instruction.
+*--------------------------------------------------------------------
+ADV_L     BSR       ALIGN           ; Make sure A4 is even
+          MOVE.L    (A4)+,D1        ; Fetch the long word
+          MOVEQ     #8,D0           ; 8 hex characters required
+
+*--------------------------------------------------------------------
+* Convert the word or long in D1 to a sequence of hex characters as
+* defined by the value in D0.B in the buffer pointed at (A5).
+*--------------------------------------------------------------------
+ADV_2     EXG       A0,A5           ; A5 is the output buffer pointer
+          JSR       CN_HEX          ; Convert D1 to D0.B hex chars
+          EXG       A0,A5           ; Restore new buffer pointer
+COPY_END  RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Code to scan through the current (list of) instructions at (A1)
@@ -506,6 +526,11 @@ LBL_NOTF  MOVEQ     #-7,D0
           RTS
 
 *--------------------------------------------------------------------
+* Disassemble memory - helper routine.
+* Enter here with:
+*
+* A4 = Address to disassemble.
+* A5 = 
 *--------------------------------------------------------------------
 DISASSEM  LEA       DISBUF(A6),A0
           MOVE.L    A0,A1

@@ -4,45 +4,45 @@
 
           INCLUDE   FDK1_QDOS_IN
 
-DATASPACE EQU       512
-IM_D0     EQU       0    IMAGE STORAGE FOR D0-A7
-IM_USP    EQU       60
-IM_SSP    EQU       78
-IM_PC     EQU       64
-IM_SR     EQU       76
-BASE_PNT  EQU       68
-TOP_PNT   EQU       72
-JBPNT     EQU       186
-OWN_JB    EQU       182
-EXTAB     EQU       82   EXCEPTION TABLE
-EXTABEND  EQU       158
-PROMPTWND EQU       158  CHANNEL ID'S FOR WND'S
-REGWND    EQU       162
-MEMWND    EQU       166
-CMDWND    EQU       170
-DISWND    EQU       174
-AUXWND    EQU       178
-MATHSTK   EQU       194
-MEMPTR    EQU       190
-REGPTR    EQU       198
-BRKPTAB   EQU       200
-RELMOD    EQU       BRKPTAB+60
-DISMOD    EQU       BRKPTAB+61
-OPCODEFLG EQU       BRKPTAB+62
-WRKSPOV   EQU       BRKPTAB+63
-DATATBL   EQU       BRKPTAB+64
-LBL_TBL   EQU       BRKPTAB+68
-WRKSPTR   EQU       BRKPTAB+72
-WRK_END   EQU       BRKPTAB+76
-DISFRST   EQU       BRKPTAB+80
-DISLAST   EQU       BRKPTAB+84
-DISBUF    EQU       BRKPTAB+88
-LBL_FLD   EQU       DISBUF+27
-MNFIELD   EQU       DISBUF+34
-OPR_FLD   EQU       DISBUF+42
-DISBUFLEN EQU       82
-BKPTABSIZ EQU       10
-HEXSTR    EQU       DISBUF+DISBUFLEN
+DATASPACE EQU       512             Stack space for the monitor
+IM_D0     EQU       0               Storage for D0-A7
+IM_USP    EQU       60              Storage for User SP  
+IM_SSP    EQU       78              Storage for Supervisor SP
+IM_PC     EQU       64              Storage for Program Counter
+IM_SR     EQU       76              Storage for Status Register
+BASE_PNT  EQU       68              Monitored job's base address
+TOP_PNT   EQU       72              Monitored job's top address
+JBPNT     EQU       186             ???? -> TODO
+OWN_JB    EQU       182             ???? -> TODO
+EXTAB     EQU       82              Exception table
+EXTABEND  EQU       158             ???? -> TODO
+PROMPTWND EQU       158             Channel IDs for Windows
+REGWND    EQU       162             Register Window ID
+MEMWND    EQU       166             Memory Window ID
+CMDWND    EQU       170             Command Window ID
+DISWND    EQU       174             Disassembly Window ID
+AUXWND    EQU       178             Auxiliary Window ID
+MATHSTK   EQU       194             Temporary maths stack address
+MEMPTR    EQU       190             ???? -> TODO
+REGPTR    EQU       198             ???? -> TODO
+BRKPTAB   EQU       200             Breakpoint table
+RELMOD    EQU       BRKPTAB+60      Relative mode flag
+DISMOD    EQU       BRKPTAB+61      Disassembly mode flag
+OPCODEFLG EQU       BRKPTAB+62      Flag - $FF = Suppress Opcodes in disassembly
+WRKSPOV   EQU       BRKPTAB+63      We overflowed the workspace flag ($FF = Overflow)
+DATATBL   EQU       BRKPTAB+64      Dataspace allocated for disassembly address etc
+LBL_TBL   EQU       BRKPTAB+68      ???? -> TODO
+WRKSPTR   EQU       BRKPTAB+72      First free space in workarea (DATATBL)
+WRK_END   EQU       BRKPTAB+76      End of the above buffer - 16
+DISFRST   EQU       BRKPTAB+80      First address to disassemble
+DISLAST   EQU       BRKPTAB+84      Last address to disassemble
+DISBUF    EQU       BRKPTAB+88      Disassembly buffer
+LBL_FLD   EQU       DISBUF+27       ???? -> TODO
+MNFIELD   EQU       DISBUF+34       ???? -> TODO
+OPR_FLD   EQU       DISBUF+42       ???? -> TODO
+DISBUFLEN EQU       82              Size of disassembly buffer (bytes)
+BKPTABSIZ EQU       10              Size of breakpoint table ???? -> TODO
+HEXSTR    EQU       DISBUF+DISBUFLEN    Where the HEX codes go in the buffer
 
           XDEF      BASE_PNT,TOP_PNT,DISMOD,OPCODEFLG,WRKSPOV,RELMOD
           XDEF      DATATBL,LBL_TBL,WRKSPTR,WRK_END,DISFRST,DISLAST
@@ -343,33 +343,46 @@ RR_BADJB  ANDI      #$DFFF,SR
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3
           MOVEQ     #-2,D0
-          BRA       PRT_ERR
+          BRA       PRT_ERR         ; Do error message then -> main loop
 
 *--------------------------------------------------------------------
+* Read some text from the user via whatever channel is in A0 at call
+* time. Exits with the data length stored at the start of the buffer,
+* but does not include the newline character, and A1 pointing at the
+* data length word.
 *--------------------------------------------------------------------
-*READ LINE FROM KBD
+RDSTRING  LEA       DISBUF+2(A6),A2 ; Buffer address
+          MOVEQ     #DISBUFLEN-2,D2 ; Buffer size
+          BSR.S     RDLIN_2         ; Fetch some text
+          SUBQ.W    #1,D1           ; Discount the newline
+          MOVE.W    D1,-(A1)        ; Save the data length
+          RTS                       ; Done
 
-RDSTRING  LEA       DISBUF+2(A6),A2
-          MOVEQ     #DISBUFLEN-2,D2
-          BSR.S     RDLIN_2
-          SUBQ.W    #1,D1
-          MOVE.W    D1,-(A1)
-          RTS
+*--------------------------------------------------------------------
+* Enter at READ_LINE to default to using the buffer at DISBUF(A6) for
+* any text input by the user. Then get some text. Exits with A1
+* pointing at the buffer start address, D1.W holding the data length
+* not including the newline. The buffer does not have the data length
+* stored in it.
+*--------------------------------------------------------------------
+READ_LINE LEA       DISBUF(A6),A2   ; Buffer address
+          MOVEQ     #DISBUFLEN,D2   ; Buffer size
 
 *--------------------------------------------------------------------
+* Enter at RDLIN_2 when you want to specify the buffer and maximum
+* buffer size instead of the defaults. Just reads the input from
+* the user. Exits with A1 pointing at the buffer start address.
 *--------------------------------------------------------------------
-READ_LINE LEA       DISBUF(A6),A2
-          MOVEQ     #DISBUFLEN,D2
-RDLIN_2   MOVE.L    CMDWND(A6),A0
-          MOVEQ     #-1,D3
-          MOVEQ     #':',D1
+RDLIN_2   MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVEQ     #-1,D3          ; Timeout
+          MOVEQ     #':',D1         ; Colon to send (No, really???)
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          MOVE.L    A2,A1
+          TRAP      #3              ; Send colon
+          MOVE.L    A2,A1           ; Buffer address
           MOVEQ     #IO_FLINE,D0
-          TRAP      #3
-          MOVE.L    A2,A1
-          RTS
+          TRAP      #3              ; Fetch some input
+          MOVE.L    A2,A1           ; Restore buffer address
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Prompt the user to supply an address. This may be as follows:
@@ -384,17 +397,20 @@ RDLIN_2   MOVE.L    CMDWND(A6),A0
 * Returns the address in D1.L and sets D0 and the Z flag to indicate
 * errors.
 *--------------------------------------------------------------------
-GET_ADDR  MOVEM.L   D2-D4/A0-A1,-(A7)
-          BSR.S     READ_LINE
-          MOVEQ     #0,D4
-GTAD_LP   SF        D3
+GET_ADDR  MOVEM.L   D2-D4/A0-A1,-(A7)   ; Save workers
+          BSR.S     READ_LINE       ; Read some text from the user
+          MOVEQ     #0,D4           ; ???? -> TODO
+
+GTAD_LP   SF        D3              ; Clear D3.B
           MOVE.B    (A1),D0
           SUBI.B    #'+',D0
           BEQ.S     GTAD_2
           SUBQ.B    #2,D0
           BNE.S     GTAD_3
           ST        D3
+
 GTAD_2    ADDQ.W    #1,A1
+
 GTAD_3    MOVE.B    (A1),D0
           CMPI.B    #10,D0
           BEQ       GTAD_E
@@ -412,17 +428,24 @@ GTAD_3    MOVE.B    (A1),D0
           BSR       READHEX         ; Get address in hexadecimal. (Default)
           BNE       GTAD_RTS
           BRA.S     GTAD_4
+
 GTAD_D    ADDQ.W    #1,A1
           BSR       READDEC
           BRA.S     GTAD_P1
+
 GTAD_P    ADDQ.W    #1,A1
           BSR       READBIN
+
 GTAD_P1   BNE.S     GTAD_RTS
           BRA.S     GTAD_4
+
 GTAD_M    MOVE.L    MEMPTR(A6),D1
           BRA.S     GTAD_5
+
 GTAD_S    MOVE.L    BASE_PNT(A6),D1
+
 GTAD_5    ADDQ.W    #1,A1
+
 GTAD_4    BSR.S     ADDVAL
           BRA.S     GTAD_LP
 GTAD_B    MOVEQ     #0,D1
@@ -1510,26 +1533,34 @@ MD3       MOVE.L    D1,A4
           BNE.S     MD_PAGE
           BRA       DP_END
 
-DO_MEM    MOVE.L    A4,D1
-          LEA       DISBUF(A6),A0
-          JSR       CN_ADDR
-          MOVE.B    #':',(A0)+
-          MOVE.B    #' ',(A0)+
-          MOVEQ     #15,D2
-DM_BYTE   MOVE.B    (A4)+,D1
-          JSR       CN_HEXB
-          MOVE.B    #' ',(A0)+
-          DBF       D2,DM_BYTE
-          MOVE.B    #' ',(A0)+
-          SUBA.W    #16,A4
-          MOVEQ     #15,D2
-DM_CHR    MOVE.B    (A4)+,D1
-          CMPI.B    #$0A,D1
-          BNE.S     DM_CH1
-          MOVEQ     #0,D1
-DM_CH1    MOVE.B    D1,(A0)+
-          DBF       D2,DM_CHR
-          RTS
+*--------------------------------------------------------------------
+* Output a single line of 16 bytes, in hex and as characters from the
+* address in A4.
+*--------------------------------------------------------------------
+DO_MEM    MOVE.L    A4,D1           ; Start address
+          LEA       DISBUF(A6),A0   ; Disassembly buffer
+          JSR       CN_ADDR         ; Buffer 5 bytes of the address
+          MOVE.B    #':',(A0)+      ; Then a colon
+          MOVE.B    #' ',(A0)+      ; Then a space (No! Really?)
+          MOVEQ     #15,D2          ; 16 bytes to dump per line
+
+DM_BYTE   MOVE.B    (A4)+,D1        ; Fetch a single byte
+          JSR       CN_HEXB         ; Buffer it in hex
+          MOVE.B    #' ',(A0)+      ; Then buffer a space
+          DBF       D2,DM_BYTE      ; Do the remainder
+
+          MOVE.B    #' ',(A0)+      ; A final space
+          SUBA.W    #16,A4          ; Start address
+          MOVEQ     #15,D2          ; 16 bytes again
+
+DM_CHR    MOVE.B    (A4)+,D1        ; Fetch a byte
+          CMPI.B    #$0A,D1         ; Newline?
+          BNE.S     DM_CH1          ; No, buffer it
+          MOVEQ     #0,D1           ; NULL = a blob
+
+DM_CH1    MOVE.B    D1,(A0)+        ; Buffer a character
+          DBF       D2,DM_CHR       ; Do the remainder
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
@@ -1543,6 +1574,7 @@ MD_MSG2   DC.W      16
           DC.B      '0123456789ABCDEF'
 
 *--------------------------------------------------------------------
+* A: Alter memory.
 *--------------------------------------------------------------------
 ALT_MEM   MOVEQ     #10,D1
           MOVEQ     #IO_SBYTE,D0
@@ -1600,6 +1632,7 @@ BADHEXMSG DC.B      0,7,'Bad Hex'
           DS.W      0
 
 *--------------------------------------------------------------------
+* S: Search for a hexadecimal string.
 *--------------------------------------------------------------------
 FIND_HEX  MOVEQ     #':',D1
           MOVEQ     #IO_SBYTE,D0
@@ -1628,6 +1661,7 @@ FH_END    MOVE.L    A3,MEMPTR(A6)
           BRA       MAIN_2
 
 *--------------------------------------------------------------------
+* H: Convert decimal to Hexadecimal.
 *--------------------------------------------------------------------
 DECTOHEX  BSR       GETADDR1
           LEA       DISBUF(A6),A0
@@ -1642,6 +1676,7 @@ DTOH_2    MOVEQ     #-1,D3
           BRA       MAIN_1
 
 *--------------------------------------------------------------------
+* G: Convert Hexadecimal to Decimal.
 *--------------------------------------------------------------------
 HEXTODEC  BSR       GETADDR1
           LEA       DISBUF+14(A6),A1
@@ -1679,54 +1714,78 @@ CH_OFFSET NOT.B     RELMOD(A6)
           BRA       MAIN_REG
 
 *--------------------------------------------------------------------
+* Open a file. Enter here with:
+*
+* D4.L = Open mode:
+*             0 = Old exclusive (OPEN)
+*             1 = Old shared (OPEN_IN)
+*             2 = New exclusive (OPEN_NEW)
+*             3 = New overwrite (OPEN_OVER)
+*             4 = Directory (OPEN_DIR)
+* A0.L = Channel for prompt.
+*
+* If a file already exists, prompt the user to overwite it and if 
+* this is chosen, delete the file and reopen it.
+*
+* On error, resume from MAIN_2 and if the user chooses not to trash
+* an existing file, resume from MAIN_1 instead, otherwise just RTS.
 *--------------------------------------------------------------------
-OPEN_FILE LEA       FN_MSG,A1
+OPEN_FILE LEA       FN_MSG,A1       ; 'File Name' prompt
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          BSR       RDSTRING
-OP_AGAIN  LEA       DISBUF(A6),A0
-          MOVEQ     #-1,D1
-          MOVE.L    D4,D3
-          MOVEQ     #IO_OPEN,D0
-          TRAP      #2
-          TST.L     D0
-          BEQ.S     OP_OK
-          ADDQ.L    #8,D0
-          BEQ.S     OP_EXISTS
-          SUBQ.L    #8,D0
-          MOVE.L    CMDWND(A6),A0
-          MOVE.W    UT_ERR,A2
-          JSR       (A2)
-          LEA       MAIN_2,A1
-OP_QUIT   ADDQ.W    #4,A7
-          JMP       (A1)
+          JSR       (A2)            ; Print prompt
+          BSR       RDSTRING        ; Read the desired filename
 
-OP_EXISTS MOVE.L    CMDWND(A6),A0
-          LEA       EXIST_MSG,A1
+OP_AGAIN  LEA       DISBUF(A6),A0   ; Get the filename
+          MOVEQ     #-1,D1          ; This job's ID
+          MOVE.L    D4,D3           ; Open Type 
+          MOVEQ     #IO_OPEN,D0
+          TRAP      #2              ; Open the file
+          TST.L     D0              ; OK?
+          BEQ.S     OP_OK           ; Yes indeed
+
+          ADDQ.L    #8,D0           ; File already exists?
+          BEQ.S     OP_EXISTS       ; Yes it does
+
+          SUBQ.L    #8,D0           ; Reset the error code
+          MOVE.L    CMDWND(A6),A0   ; COMMAND CHANEL
+          MOVE.W    UT_ERR,A2
+          JSR       (A2)            ; Print error message
+          LEA       MAIN_2,A1       ; Where we want to be
+
+OP_QUIT   ADDQ.W    #4,A7           ; Tidy stack return addresses
+          JMP       (A1)            ; Skip to MAIN_2
+
+*--------------------------------------------------------------------
+* The requested output file already exists. Exit back to MAIN_1 if we
+* choose not to overwite an existing file.
+*--------------------------------------------------------------------
+OP_EXISTS MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          LEA       EXIST_MSG,A1    ; Prompt 'File exists, overwrite'
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          MOVEQ     #-1,D3
+          JSR       (A2)            ; Print prompt
+          MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #SD_CURE,D0
-          TRAP      #3
+          TRAP      #3              ; Enable cursor
           MOVEQ     #IO_FBYTE,D0
-          TRAP      #3
-          MOVE.W    D1,-(A7)
+          TRAP      #3              ; Fetch a single byte
+          MOVE.W    D1,-(A7)        ; Save it
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          LEA       MAIN_1,A1
-          MOVE.W    (A7)+,D1
-          ANDI.B    #$DF,D1
-          CMPI.B    #'Y',D1
-          BNE.S     OP_QUIT
-          MOVEQ     #10,D1
+          TRAP      #3              ; Print it back to channel
+          LEA       MAIN_1,A1       ; Where to go if no overwrite
+          MOVE.W    (A7)+,D1        ; Get the byte back again
+          ANDI.B    #$DF,D1         ; Uppercase it
+          CMPI.B    #'Y',D1         ; Overwite?
+          BNE.S     OP_QUIT         ; No, exit from here
+          MOVEQ     #10,D1          ; Yes - newline character
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          LEA       DISBUF(A6),A0
+          TRAP      #3              ; Print it
+          LEA       DISBUF(A6),A0   ; Get the filename to delete
           MOVEQ     #-1,D1
           MOVEQ     #IO_DELET,D0
-          TRAP      #2
-          BRA.S     OP_AGAIN
-OP_OK     RTS
+          TRAP      #2              ; Delete the existing file
+          BRA.S     OP_AGAIN        ; And re-create it
+
+OP_OK     RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Message to be printed when prompting for a file name.
@@ -1778,118 +1837,165 @@ MD_HEADR  DC.W      MDH_END-*-2
 MDH_END   EQU       *         
 
 *--------------------------------------------------------------------
+* L: Memory dump command.
+* Reads a start and end address into D4 and D5/D1 then dumps the area
+* between the two in lines of 16 bytes as hex and character, if the
+* characters are printable.
 *--------------------------------------------------------------------
-MEMDUMP_1 MOVEQ     #2,D4
-          BSR       OPEN_FILE
-          MOVE.L    A0,A5
-          BSR       FIRSTLAST
-          MOVE.L    D4,A4
-          MOVE.L    A5,A0
-          LEA       MD_HEADR,A1
+MEMDUMP_1 MOVEQ     #2,D4           ; OPEN_NEW mode
+          BSR       OPEN_FILE       ; Open a file
+          MOVE.L    A0,A5           ; Save the channel ID
+          BSR       FIRSTLAST       ; Get start and end addresses
+          MOVE.L    D4,A4           ; Start address in A4
+          MOVE.L    A5,A0           ; Output channel ID
+          LEA       MD_HEADR,A1     ; Prompt - headings
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-MD1_LOOP  BSR       DO_MEM
-          LEA       DISBUF+56(A6),A1
-          MOVEQ     #15,D0
-MD1_LP1   CMPI.B    #$20,0(A1,D0.W)
-          BCS.S     MK_POINT
-          CMPI.B    #$7F,0(A1,D0.W)
-          BCS.S     PNT_NXT
-MK_POINT  MOVE.B    #'.',0(A1,D0.W)
-PNT_NXT   DBF       D0,MD1_LP1
-          MOVE.L    A5,A0
-          LEA       DISBUF(A6),A1
-          MOVEQ     #72,D2
-          MOVEQ     #-1,D3
-          MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          TST.L     D0
-          BNE.S     MD1_END
-          MOVEQ     #10,D1
-          MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          TST.L     D0
-          BNE.S     MD1_END
-          CMPA.L    D5,A4
-          BLE.S     MD1_LOOP
-MD1_END   MOVE.L    D0,D4
-          MOVEQ     #IO_CLOSE,D0
-          TRAP      #2
-          MOVE.L    D4,D0
-PRT_ERR   MOVE.L    CMDWND(A6),A0
-          MOVE.W    UT_ERR,A2
-          JSR       (A2)
-          BRA       MAIN_2
+          JSR       (A2)            ; Print headings prompt
 
 *--------------------------------------------------------------------
+* Memory dump main loop.
 *--------------------------------------------------------------------
-DIS_FILE  MOVEQ     #2,D4
-          BSR       OPEN_FILE
-          MOVE.L    A0,A5
-DIS_WRK   MOVE.L    CMDWND(A6),A0
-          LEA       WRKSP_MSG,A1
+MD1_LOOP  BSR       DO_MEM          ; Dump 16 bytes from (A4)
+          LEA       DISBUF+56(A6),A1    ; ???? -> TODO
+          MOVEQ     #15,D0          ; 16 bytes
+
+MD1_LP1   CMPI.B    #$20,0(A1,D0.W) ; Less than a space character?
+          BCS.S     MK_POINT        ; Yes, substitute a dot
+          CMPI.B    #$7F,0(A1,D0.W) ; Control characters 
+          BCS.S     PNT_NXT         ; No, skip
+
+MK_POINT  MOVE.B    #'.',0(A1,D0.W) ; Buffer a dot to replace unprintables
+
+PNT_NXT   DBF       D0,MD1_LP1      ; Do the remaining bytes
+          MOVE.L    A5,A0           ; Output channel ID
+          LEA       DISBUF(A6),A1   ; Start of buffer to be printed
+          MOVEQ     #72,D2          ; Buffer size
+          MOVEQ     #-1,D3          ; Timeout is infinite
+          MOVEQ     #IO_SSTRG,D0    
+          TRAP      #3              ; Print the string
+          TST.L     D0              ; OK?
+          BNE.S     MD1_END         ; No, skip
+          MOVEQ     #10,D1          ; Newline character
+          MOVEQ     #IO_SBYTE,D0
+          TRAP      #3              ; Print it
+          TST.L     D0              ; OK?
+          BNE.S     MD1_END         ; No, skip
+          CMPA.L    D5,A4           ; Reached the end yet?
+          BLE.S     MD1_LOOP        ; No, do some more
+
+MD1_END   MOVE.L    D0,D4           ; Save error code
+          MOVEQ     #IO_CLOSE,D0
+          TRAP      #2              ; Close output file
+          MOVE.L    D4,D0           ; Retrieve error code
+
+*--------------------------------------------------------------------
+* Print an error message, according to the code in D0.L, to the 
+* COMMAND channel. Then skip back into the main loop to wait for
+* another command.
+*--------------------------------------------------------------------
+PRT_ERR   MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVE.W    UT_ERR,A2
+          JSR       (A2)            ; Print message
+          BRA       MAIN_2          ; Back to the main loop
+
+*--------------------------------------------------------------------
+* D: Dissassemble to a file.
+*--------------------------------------------------------------------
+DIS_FILE  MOVEQ     #2,D4           ; OPEN_NEW mode
+          BSR       OPEN_FILE       ; Open a file
+          MOVE.L    A0,A5           ; Save channnel ID
+
+DIS_WRK   MOVE.L    CMDWND(A6),A0   ; COMMAND window
+          LEA       WRKSP_MSG,A1    ; How much workspace prompt
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          BSR       READ_LINE
-          SUBQ.W    #1,D1
-          BEQ.S     DIS_DEF
-          JSR       READDEC
-          CMPI.B    #10,(A1)
-          BNE.S     DIS_WRK
-          BRA.S     DIS_ALLOC
-DIS_DEF   MOVE.L    #1024,D1
-DIS_ALLOC MOVEQ     #-1,D2
-          MOVEQ     #MT_ALCHP,D0
-          TRAP      #1
-          TST.L     D0
-          BNE.S     DIS_WRK
-          MOVE.L    A0,DATATBL(A6)
-          MOVE.L    A0,WRKSPTR(A6)
-          LEA       -$10(A0,D1.L),A0
-          MOVE.L    A0,WRK_END(A6)
-          SF        WRKSPOV(A6)
-          BSR       FIRSTLAST
-          MOVE.L    D4,DISFRST(A6)
-          MOVE.L    D5,DISLAST(A6)
-          LEA       OPC_MSG,A1
-          MOVE.L    CMDWND(A6),A0
+          JSR       (A2)            ; Print the prompt
+          BSR       READ_LINE       ; Fetch some input
+          SUBQ.W    #1,D1           ; Get anything?
+          BEQ.S     DIS_DEF         ; No, Allocate 1024 bytes workspace
+          JSR       READDEC         ; Convert buffer to decimal number
+          CMPI.B    #10,(A1)        ; Newline = valid numeric read
+          BNE.S     DIS_WRK         ; Invalid number, keep prompting
+          BRA.S     DIS_ALLOC       ; Allocate requested workspace size
+
+*--------------------------------------------------------------------
+* Allocate a buffer of 1024 bytes for the disassembly. We can also 
+* enter at DIS_ALLOC with D1.L holding the desired space in bytes.
+*--------------------------------------------------------------------
+DIS_DEF   MOVE.L    #1024,D1        ; Assume 1024 bytes
+DIS_ALLOC MOVEQ     #-1,D2          ; Owned by this job      
+          MOVEQ     #MT_ALCHP,D0    ; Allocate memory trap
+          TRAP      #1              ; Do it
+          TST.L     D0              ; OK?
+          BNE.S     DIS_WRK         ; No, bale out
+          MOVE.L    A0,DATATBL(A6)  ; Save workarea address
+          MOVE.L    A0,WRKSPTR(A6)  ; Current workarea pointer
+          LEA       -$10(A0,D1.L),A0    ; 16 bytes from the end of the new buffer
+          MOVE.L    A0,WRK_END(A6)  ; Save as end of workspace
+          SF        WRKSPOV(A6)     ; Set a flag - no overflow yet = $00
+          BSR       FIRSTLAST       ; Get first & last addresses to disassemble
+          MOVE.L    D4,DISFRST(A6)  ; Save first address
+          MOVE.L    D5,DISLAST(A6)  ; Save last address
+          LEA       OPC_MSG,A1      ; Prompt 'Suppress opcode ? (Y/N)
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window is output
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
+          JSR       (A2)            ; Print the prompt
           MOVEQ     #-1,D3
           MOVEQ     #SD_CURE,D0
-          TRAP      #3
+          TRAP      #3              ; Enable the COMMAND cursor
           MOVEQ     #IO_FBYTE,D0
-          TRAP      #3
-          ANDI.B    #$DF,D1
-          CMPI.B    #'Y',D1
-          SEQ       OPCODEFLG(A6)
+          TRAP      #3              ; Fetch a byte
+          ANDI.B    #$DF,D1         ; $DF = 1101 1111 = uppercase
+          CMPI.B    #'Y',D1         ; Did we wish to suppress opcodes?
+          SEQ       OPCODEFLG(A6)   ; $FF = yes if 'Y', $00 otherwise.
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          LEA       DATA_MSG,A1
+          TRAP      #3              ; Print the users response (Y/N)
+          LEA       DATA_MSG,A1     ; Prompt 'Data areas'
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-DATA_LOOP BSR       FIRSTLAST
-          OR.L      D4,D1
-          BEQ.S     DIS_START
-          BSR       GET_SIZE
-          ROR.L     #8,D1
-          ANDI.L    #$FF000000,D1
-          OR.L      D4,D1
-          JSR       ADD_WRK
-          MOVE.L    D5,D1
-          JSR       ADD_WRK
-          TST.B     WRKSPOV(A6)
-          BEQ.S     DATA_LOOP
-WRKSP_ERR MOVE.L    CMDWND(A6),A0
-          LEA       WRKERRMSG,A1
+          JSR       (A2)            ; Print the prompt
+
+*--------------------------------------------------------------------
+* Loop around until the user stops giving us numbers, to find out any
+* data areas within the range of addresses to be disassembled. These
+* will be saved in the workarea buffer as long words:
+*
+* START ADDRESS
+* END ADDRESS
+* ...
+*
+* Each start address has the high byte = $FF for byte sized data,
+* = $00 for word sized data or $01 for long sized data.  
+*--------------------------------------------------------------------
+DATA_LOOP BSR       FIRSTLAST       ; Get start and end addresses
+          OR.L      D4,D1           ; D4 = start, D1 & D5 = last
+          BEQ.S     DIS_START       ; Both zero = do the disassembly
+          BSR       GET_SIZE        ; D1 = Byte -1, word 0, or long 1
+          ROR.L     #8,D1           ; D1 = -1, 0 or $01000000
+          ANDI.L    #$FF000000,D1   ; D1 = $FF000000, 0 or $01000000
+          OR.L      D4,D1           ; Set the start address high byte to 
+;                                   ; $FF for byte
+;                                   ; $00 for word
+;                                   ; $01 for long
+          JSR       ADD_WRK         ; Save D1.L in the workarea buffer
+          MOVE.L    D5,D1           ; End address
+          JSR       ADD_WRK         ; Save D1.L in the workarea buffer
+          TST.B     WRKSPOV(A6)     ; Workspace ok still?
+          BEQ.S     DATA_LOOP       ; Yes.
+
+*--------------------------------------------------------------------
+* We have unfortunately overflowed the allocated workspace for a 
+* disassembly. Advise the user, reclaim the workspace that we had
+* allocated earlier and close the output file.
+*--------------------------------------------------------------------
+WRKSP_ERR MOVE.L    CMDWND(A6),A0   ; COMMAND channel
+          LEA       WRKERRMSG,A1    ; Prompt 'Workspace Overflow'
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          MOVE.L    DATATBL(A6),A0
+          JSR       (A2)            ; Print prompt
+          MOVE.L    DATATBL(A6),A0  ; Workspace address
           MOVEQ     #MT_RECHP,D0
-          TRAP      #1
-          MOVE.L    A5,A0
+          TRAP      #1              ; Reclaim workspace buffer
+          MOVE.L    A5,A0           ; Output file ID
           MOVEQ     #IO_CLOSE,D0
-          TRAP      #2
+          TRAP      #2              ; Close it
           BRA       MAIN_1
 
 *--------------------------------------------------------------------
@@ -1898,49 +2004,58 @@ WRKSP_ERR MOVE.L    CMDWND(A6),A0
 WRKERRMSG DC.B      0,18,'Workspace Overflow'
 
 *--------------------------------------------------------------------
+* D: Disassemble to screen. Enter here from disassemble to file with
+* A5 holding the ouput file ID too.
 *--------------------------------------------------------------------
-DIS_START MOVE.L    WRKSPTR(A6),LBL_TBL(A6)
-          SF        DISMOD(A6)
-          MOVE.L    DISFRST(A6),A4
-DIS1_LP   MOVE.L    A5,-(A7)
-          JSR       DISASSEM
-          MOVE.L    (A7)+,A5
-          TST.B     WRKSPOV(A6)
-          BNE.S     WRKSP_ERR
-          CMPA.L    DISLAST(A6),A4
-          BLS.S     DIS1_LP
-          ADDQ.B    #1,DISMOD(A6)
-          MOVE.L    DISFRST(A6),A4
-          MOVE.L    A5,-(A7)
-DIS2_LP   JSR       DISASSEM
-          MOVE.L    A0,D2
-          LEA       DISBUF(A6),A1
-          TST.B     OPCODEFLG(A6)
-          BEQ.S     DIS_OUT
-          LEA       LBL_FLD(A6),A1
-DIS_OUT   SUB.L     A1,D2
-          MOVE.L    (A7),A0
-          MOVEQ     #-1,D3
+DIS_START MOVE.L    WRKSPTR(A6),LBL_TBL(A6) ; Save ???? -> TODO
+          SF        DISMOD(A6)      ; Flag - $00 set in DISMOD.
+          MOVE.L    DISFRST(A6),A4  ; Address to be disassembled
+
+DIS1_LP   MOVE.L    A5,-(A7)        ; Save output channel ID
+          JSR       DISASSEM        ; Disassemble address (A4)
+          MOVE.L    (A7)+,A5        ; Restore worker
+          TST.B     WRKSPOV(A6)     ; Did we overflow workspace?
+          BNE.S     WRKSP_ERR       ; Sadly, yes
+          CMPA.L    DISLAST(A6),A4  ; No - have we finished?
+          BLS.S     DIS1_LP         ; No, do some more
+          ADDQ.B    #1,DISMOD(A6)   ; Flag - $00 set in DISMOD
+          MOVE.L    DISFRST(A6),A4  ; Get the start address again
+          MOVE.L    A5,-(A7)        ; Save the worker again        
+
+DIS2_LP   JSR       DISASSEM        ; Disassemble address (A4)
+          MOVE.L    A0,D2           ; ???? -> TODO
+          LEA       DISBUF(A6),A1   ; Disassembly buffer start
+          TST.B     OPCODEFLG(A6)   ; Are we suppressing opcodes?
+          BEQ.S     DIS_OUT         ; No we are not
+          LEA       LBL_FLD(A6),A1  ; We are, just do the labels etc
+
+DIS_OUT   SUB.L     A1,D2           ; How many bytes to send?
+          MOVE.L    (A7),A0         ; Output channel ID
+          MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          TST.L     D0
-          BNE.S     DIS_QUIT
-          MOVEQ     #10,D1
+          TRAP      #3              ; Send a string of bytes
+          TST.L     D0              ; OK?
+          BNE.S     DIS_QUIT        ; No, skip
+          MOVEQ     #10,D1          ; NEwline character
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          TST.L     D0
-          BNE.S     DIS_QUIT
-          CMPA.L    DISLAST(A6),A4
-          BLS.S     DIS2_LP
-DIS_QUIT  MOVE.L    D0,D4
-          MOVE.L    (A7)+,A0
+          TRAP      #3              ; Send the newline
+          TST.L     D0              ; OK?
+          BNE.S     DIS_QUIT        ; No, skip
+          CMPA.L    DISLAST(A6),A4  ; Are we done yet?
+          BLS.S     DIS2_LP         ; No, do some more
+
+*--------------------------------------------------------------------
+* Either an error or we are done when we arrive here.
+*--------------------------------------------------------------------
+DIS_QUIT  MOVE.L    D0,D4           ; Error code is saved
+          MOVE.L    (A7)+,A0        ; Output channel ID
           MOVEQ     #IO_CLOSE,D0
-          TRAP      #2
-          MOVE.L    DATATBL(A6),A0
+          TRAP      #2              ; Close it
+          MOVE.L    DATATBL(A6),A0  ; Work area
           MOVEQ     #MT_RECHP,D0
-          TRAP      #1
-          MOVE.L    D4,D0
-          BRA       PRT_ERR
+          TRAP      #1              ; Reclaim it
+          MOVE.L    D4,D0           ; Restore error code
+          BRA       PRT_ERR         ; Do error message then -> main loop
 
 *--------------------------------------------------------------------
 * Prompt message to ask for a (new) workspace size.
@@ -1953,10 +2068,13 @@ WRKSP_MSG DC.B      0,14,'Workspace Size'
 OPC_MSG   DC.B      0,24,'Suppress opcode ? (Y/N) '
 
 *--------------------------------------------------------------------
+* Prompt when user needs to enter a list of data areas in amongst the
+* memeory range to be disassembled.
 *--------------------------------------------------------------------
 DATA_MSG  DC.B      0,12,$0A,'Data areas',$0A
 
 *--------------------------------------------------------------------
+* E: Eaxmine a job.
 *--------------------------------------------------------------------
 EXAMINE   JSR       RDSTRING
           ADDQ.W    #2,A1
@@ -1964,6 +2082,7 @@ EXAMINE   JSR       RDSTRING
           BNE.S     EX2
           CMPI.B    #10,(A1)
           BEQ.S     GET_JB
+
 EX2       MOVEQ     #1,D4
           BSR       OP_AGAIN
           LEA       DISBUF(A6),A1
@@ -1999,12 +2118,14 @@ EX2       MOVEQ     #1,D4
           MOVEQ     #MT_FRJOB,D0
           TRAP      #1
           MOVE.L    (A7)+,A0
+
 EX_ERR    MOVE.L    D0,D4
           MOVEQ     #IO_CLOSE,D0
           TRAP      #2
           MOVE.L    D4,D0
-          BNE       PRT_ERR
+          BNE       PRT_ERR         ; Do error message then -> main loop
           MOVE.L    D7,D1
+
 GET_JB    MOVE.L    $28068,A0
           LSL.W     #2,D1
           ADDA.W    D1,A0
@@ -2012,8 +2133,10 @@ GET_JB    MOVE.L    $28068,A0
           BGE.S     BAD_JOB
           TST.B     (A0)
           BGE.S     COPY_REG
+
 BAD_JOB   MOVEQ     #-2,D0
-          BRA       PRT_ERR
+          BRA       PRT_ERR         ; Do error message then -> main loop
+
 COPY_REG  TRAP      #0
           BSR.S     EXAM_REGS
           ANDI      #$DFFF,SR
@@ -2021,11 +2144,13 @@ COPY_REG  TRAP      #0
           BSR       DSPMEM
           BSR       DSPDIS
           BRA       MAIN_2
+
 EXAM_REGS MOVE.L    A0,JBPNT(A6)
           MOVE.L    (A0),A0
           LEA       $20(A0),A0
           MOVE.L    A6,A1
           MOVEQ     #15,D0
+
 COPY_R_LP MOVE.L    (A0)+,(A1)+
           DBF       D0,COPY_R_LP
           MOVE.W    (A0)+,IM_SR(A6)
@@ -2040,7 +2165,9 @@ COPY_R_LP MOVE.L    (A0)+,(A1)+
           BEQ.S     ST_TP_1
           ADDA.L    (A0),A0
           BRA.S     ST_TP
+
 ST_TP_1   MOVE.L    $28014,A0
+
 ST_TP     MOVE.L    A0,(A1)
           MOVE.L    A7,A0
           ADDQ.W    #4,A0
@@ -2048,34 +2175,43 @@ ST_TP     MOVE.L    A0,(A1)
           RTS
 
 *--------------------------------------------------------------------
+* Prompt the user to enter the desired sizes for any data areas in a
+* disassembly. Enter here with A0 holding the desired channel ID for
+* input/output.
+* Exit with D1.B = -1 for byte sized data areas
+*                   0 for word sized data areas
+*                   1 for long sized data areas.
 *--------------------------------------------------------------------
-GET_SIZE  MOVE.L    D4,-(A7)
-          LEA       SIZMSG,A1
+GET_SIZE  MOVE.L    D4,-(A7)        ; Save worker
+          LEA       SIZMSG,A1       ; Prompt 'Size ? (B,W,L) '
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          MOVEQ     #SD_CURE,D0
+          JSR       (A2)            ; Print prompt
+          MOVEQ     #SD_CURE,D0     ; Enable cusror
           TRAP      #3
-GTSIZ_1   MOVEQ     #IO_FBYTE,D0
+GTSIZ_1   MOVEQ     #IO_FBYTE,D0    ; Fetch a byte
           TRAP      #3
-          MOVEQ     #-33,D0
-          AND.B     D0,D1
-          MOVEQ     #-1,D4
-          CMPI.B    #'B',D1
-          BEQ.S     GTSIZ_END
-          MOVEQ     #0,D4
-          CMPI.B    #'W',D1
-          BEQ.S     GTSIZ_END
-          MOVEQ     #1,D4
-          CMPI.B    #'L',D1
-          BNE.S     GTSIZ_1
+          MOVEQ     #-33,D0         ; $DF = 1101 1111 = uppercase
+          AND.B     D0,D1           ; Convert to uppercase
+          MOVEQ     #-1,D4          ; Assume byte
+          CMPI.B    #'B',D1         ; Correct?
+          BEQ.S     GTSIZ_END       ; Yes
+
+          MOVEQ     #0,D4           ; Assume word
+          CMPI.B    #'W',D1         ; Correct?
+          BEQ.S     GTSIZ_END       ; Yes
+
+          MOVEQ     #1,D4           ; Assume long
+          CMPI.B    #'L',D1         ; Correct?
+          BNE.S     GTSIZ_1         ; Yes
+
 GTSIZ_END
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
+          TRAP      #3              ; Print uppercase response character
           MOVEQ     #10,D1
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          MOVE.B    D4,D1
-          MOVE.L    (A7)+,D4
+          TRAP      #3              ; And a newline
+          MOVE.B    D4,D1           ; D1 is the size flag
+          MOVE.L    (A7)+,D4        ; Restore worker
           RTS
 
 *--------------------------------------------------------------------
