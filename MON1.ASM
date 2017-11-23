@@ -15,7 +15,7 @@ TOP_PNT   EQU       72              Monitored job's top address
 JBPNT     EQU       186             ???? -> TODO
 OWN_JB    EQU       182             ???? -> TODO
 EXTAB     EQU       82              Exception table
-EXTABEND  EQU       158             ???? -> TODO
+EXTABEND  EQU       158             End of Exception Table
 PROMPTWND EQU       158             Channel IDs for Windows
 REGWND    EQU       162             Register Window ID
 MEMWND    EQU       166             Memory Window ID
@@ -70,23 +70,23 @@ HEXSTR    EQU       DISBUF+DISBUFLEN    Where the HEX codes go in the buffer
 * Use the filler long word to hold the base address of the job's 
 * dataspace - if it was stared by EXEC. Otherwise, it's random.
 *--------------------------------------------------------------------
-SYSVARS   DS.L      1
+SYSVARS   DS.L      1               ; Storage for SYSVARS address
 
-          DC.W      $4AFB,8
-          DC.B      'MULTIMON'
+          DC.W      $4AFB,8         ; Job flag and name size
+          DC.B      'MULTIMON'      ; Job name
 
 *--------------------------------------------------------------------
 * Call MT_INF to get the current jobid in D1.L. If this is zero, we
 * are in SuperBASIC so link MON in as a new procedure. Otherwise, we
 * have been EXEC'd and are running as a standalone job.
 *--------------------------------------------------------------------
-START     MOVEQ     #MT_INF,D0
+START     MOVEQ     #MT_INF,D0      ; Get system information
           TRAP      #1
-          TST.L     D1
-          BNE.S     START2
-          LEA       PROCTAB,A1
-          MOVE.W    BP_INIT,A2
-          JMP       (A2)
+          TST.L     D1              ; Check is SuperBASIC (Job zero)
+          BNE.S     START2          ; Not SuperBASIC (job zero)             
+          LEA       PROCTAB,A1      ; Must be SuperBASIC - one proc
+          MOVE.W    BP_INIT,A2      ; Link MON proc into SuperBASIC
+          JMP       (A2)            ; Do it & exit.
 
 *--------------------------------------------------------------------
 * If we arrive here, we are running as a standalone job:
@@ -100,36 +100,43 @@ START     MOVEQ     #MT_INF,D0
 * Point A6.L at the absolute address of the dataspace area for this
 * job, then save it in SYSVARS.
 *--------------------------------------------------------------------
-START2    ADDA.L    A4,A6
-          LEA       SYSVARS,A1
-          MOVE.L    A6,(A1)
-          TRAP      #0
-          MOVE.L    $28064,OWN_JB(A6)
-          MOVE.L    $28068,A0
-          BSR       EXAM_REGS
-          ANDI      #$DFFF,SR
-          CLR.L     MEMPTR(A6)
-          ST        RELMOD(A6)
-          LEA       EXTABEND(A6),A7
-          MOVEQ     #10,D0
+START2    ADDA.L    A4,A6           ; A6 = Start of data space
+          LEA       SYSVARS,A1      ; Storage in standard job header
+          MOVE.L    A6,(A1)         ; Save A6 in header
+          TRAP      #0              ; Supervisor mode
+          MOVE.L    $28064,OWN_JB(A6)   ; SV_JBPNT = Own Job id
+          MOVE.L    $28068,A0       ; SV_JBBAS = Start of Job Table  
+          BSR       EXAM_REGS       ; ???? -> TODO
+          ANDI      #$DFFF,SR       ; Clear Supervisor bit
+          CLR.L     MEMPTR(A6)      ; ???? -> TODO
+          ST        RELMOD(A6)      ; $FF = Relative? ???? -> TODO
+          LEA       EXTABEND(A6),A7 ; Top of Exception vector table
+          MOVEQ     #10,D0          ; Counter for 11 exception vectors
 
 *--------------------------------------------------------------------
+* Loop around for TRAP #15 to TRAP #5. Each of these points to the
+* EXBRKPNT code and will fire a breakpoint if executed.
 *--------------------------------------------------------------------
-SETTRAPS  PEA       EXBRKPNT
-          DBF       D0,SETTRAPS
-          PEA       EXINTL7
-          PEA       EXTRACE
-          PEA       EXPRIVV
-          PEA       EXTRAPV
-          PEA       EXCHK
-          PEA       EXDIVZER
-          PEA       EXILLINST
-          PEA       EXADDERR
-          MOVE.L    A7,A1
-          LEA       DATASPACE(A6),A7
-          MOVEQ     #-1,D1
-          MOVEQ     #MT_TRAPV,D0
-          TRAP      #1
+SETTRAPS  PEA       EXBRKPNT        ; Code for this trap's vector
+          DBF       D0,SETTRAPS     ; Do all of #15 down to #5
+
+*--------------------------------------------------------------------
+* The rest of the exception vector table follows.
+*--------------------------------------------------------------------
+          PEA       EXINTL7         ; Interrupt level 7
+          PEA       EXTRACE         ; Trace exception
+          PEA       EXPRIVV         ; Privilege violation
+          PEA       EXTRAPV         ; TRAPV
+          PEA       EXCHK           ; CHK
+          PEA       EXDIVZER        ; Divide by zero exception
+          PEA       EXILLINST       ; ILLEGAL instruction exception
+          PEA       EXADDERR        ; Address error exception
+
+          MOVE.L    A7,A1           ; Exception vector table address
+          LEA       DATASPACE(A6),A7    ; Reset stack pointer
+          MOVEQ     #-1,D1          ; For the current job
+          MOVEQ     #MT_TRAPV,D0    ;
+          TRAP      #1              ; Set the exception vectors
 
 *--------------------------------------------------------------------
 * There are 5 separate windows to be opened at startup. D7 has the
@@ -183,12 +190,15 @@ BAS_ENT   MOVEQ     #-1,D1
 BAS_QUIT  RTS
 
 *--------------------------------------------------------------------
+* The procedure (and function) definition block to link the new MON
+* procedure into SuperBASIC. Not used if this code is running as a
+* job, or if this code is run in a non-zero job id. (SuperBASIC = 0.)
 *--------------------------------------------------------------------
-PROCTAB   DC.W      1
-          DC.W      BAS_ENT-*
-          DC.B      3,'MON'
-          DS.W      0
-          DC.W      0,0,0
+PROCTAB   DC.W      1               ; One PROCedure
+          DC.W      BAS_ENT-*       ; Where it starts
+          DC.B      3,'MON'         ; What it is called
+          DC.W      0               ; No FuNctions (DC not DS!)
+          DC.W      0,0,0           ; End of FNs, end of list.        
 
 *--------------------------------------------------------------------
 * The uppermost window displays a minilam help prompt all the time.
@@ -239,6 +249,7 @@ WNDPRMS   DC.W      16
           DS.W      0
 
 *--------------------------------------------------------------------
+* The AUXILIARY WINDOW for Help and disassembly etc. 
 *--------------------------------------------------------------------
           DC.W      17
           DC.B      'SCR_448X190A32X27' AUX WINDOW
@@ -269,7 +280,7 @@ WNDPAR2   DC.B      0,0,2,7
 *--------------------------------------------------------------------
 SIGNON    DC.W      39
           DC.B      'MULTIMON V2.1',10
-          DC.B      ' 1986, 87 JAN BREDENBEEK'   ; CHR$(127) (C)
+          DC.B      127, ' 1986, 87 JAN BREDENBEEK'
           DS.W      0
 
 *--------------------------------------------------------------------
@@ -934,25 +945,48 @@ EXINTL7   MOVE.L    A3,-(A7)
           JSR       SAVREGS
           LEA       INTL7MSG,A1
           BRA.S     MAINERR1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXADDERR  ADDQ.W    #8,A7
           JSR       SAVREGS
           LEA       ADDERRMSG,A1
           BRA.S     MAINERR1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXILLINST JSR       SAVREGS
           LEA       ILLINSMSG,A1
           BRA.S     MAINERR1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXDIVZER  JSR       SAVREGS
           LEA       DIVZERMSG,A1
           BRA.S     MAINERR1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXCHK     JSR       SAVREGS
           LEA       CHKMSG,A1
           BRA.S     MAINERR1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXTRAPV   JSR       SAVREGS
           LEA       TRAPVMSG,A1
           BRA.S     MAINERR1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 EXPRIVV   JSR       SAVREGS
           LEA       PRIVMSG,A1
           BRA.S     MAINERR1
+
+*--------------------------------------------------------------------
+* The code here is executed on any trap #5 to trap #15 by this job,
+* the monitor, not the job being monitored. It is also ???? -> TODO
+*--------------------------------------------------------------------
 EXBRKPNT  JSR       SAVREGS
           SUBQ.L    #2,IM_PC(A6)
           SUBQ.L    #2,MEMPTR(A6)
@@ -2433,9 +2467,9 @@ HLP1_END  EQU       *
 *--------------------------------------------------------------------
 HELPMSG2  DC.W      HLP2_END-*-2
           DC.B      '                             QL MULTIMON V2.1',10
-          DC.B      '                        1986, 87 BY JAN BREDENBEEK',10,10
+          DC.B      '                       ', 127,' 1986, 87 BY JAN BREDENBEEK',10,10
           DC.B      'COMMANDS:',10,10
-          DC.B      '섹씩: CHANGE MEMORY POINTER            ALT-섹씩: CHANGE REGISTER POINTER',10
+          DC.B      188,189,190,191,': CHANGE MEMORY POINTER            ALT-',188,189,190,191,': CHANGE REGISTER POINTER',10
           DC.B      'F2: MEMORY DUMP TO SCREEN              F3: DISASSEMBLE TO SCREEN',10
           DC.B      'A: ALTER MEMORY                        B: SET BREAKPOINT',10
           DC.B      'C: CALL A SUBROUTINE                   D: DISASSEMBLE TO FILE',10
