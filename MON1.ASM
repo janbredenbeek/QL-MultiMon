@@ -284,38 +284,89 @@ SIGNON    DC.W      39
           DS.W      0
 
 *--------------------------------------------------------------------
+* Save the registers for later display. Called whenever we hit an
+* exception in a monitored job. This means that register values are
+* as per the monitored job (or at least, the one that caused the
+* exception) and not yet the monitor's registers as the scheduler
+* has not been run to reschedule the current job back to the monitor.
+* We are also in supervisor mode, hence USP and not A7 below! A7 is
+* referring to the Supervisor SP in the following code.
+*
+* SR.S is set (for supervisor mode).
+* SR.T is cleared (to disable trace).
+* PC is stacked at -(SSP).
+* SR is stacked at -(SSP).
+* 
+* A7 = SSP = Pointing at SR on stack, so:
+*
+* 2(A7) = Program Counter.L
+* 0(A7) = Status Register.W
+*
+* BUS and ADDRESS Exceptions also stack:
+*
+* Instruction Register (Word)
+* Exception Address Low Word (Word)
+* Exception Address High Word (Word)
+* Memory Access Type & Function Code (Word)
+*
+* A7 = SSP = Pointing at the Memory Access type & Function code word, so:
+*
+* A(A7) = Program Counter.L
+* 8(A7) = Status Register.W
+* 6(A7) = First word of the excepting instruction.W
+* 2(A7) = Address accessed in error.L
+* 0(A7) = Function code etc.W
+*
+* BUS Exceptions are not possible/likely on a QL. There are no external
+* hardware stuff.
+*
+* ADDRESS Exceptions are of course, possible. On the 68008 anyway.
+*
+* When we enter here, SSP aka, A7, is pointing always, regardless of
+* the exception type, at the return address above the SR word on the 
+* stack - because we JSR here. So the stack is:
+*
+* 6(A7) = Program Counter.L
+* 4(A7) = Status Register.W
+* 0(A7) = Return address.L
 *--------------------------------------------------------------------
-SAVREGS   MOVE.L    A6,-(A7)
-          MOVE.L    $28064,A6
-          MOVE.L    (A6),A6
-          MOVEM.L   D0-D7/A0-A5,$20(A6)
-          MOVE.L    (A7)+,$58(A6)
-          MOVE      USP,A1
-          MOVE.L    A1,$5C(A6)
-          MOVE.L    (A7)+,A5
-          MOVE.W    (A7)+,$60(A6)
-          MOVE.L    (A7)+,$62(A6)
-          MOVE.L    $28064,A0
-          MOVE.L    SYSVARS,A6
-          BSR       EXAM_REGS
-          LEA       DATASPACE(A6),A0
-          MOVE      A0,USP
-          MOVE.L    $28064,A0
-          MOVE.L    OWN_JB(A6),A2
-          CMPA.L    A0,A2
-          BEQ.S     GO_MON
-          MOVE.L    (A0),A0
-          MOVE.W    #-1,$14(A0)
-          SF        $17(A0)
-GO_MON    MOVE.L    A2,$28064
-          MOVE.L    (A2),A2
-          CLR.W     $14(A2)
-          MOVE.L    $0C(A2),D0
-          BEQ.S     GO_MON1
-          MOVE.L    D0,A2
-          SF        (A2)
-GO_MON1   MOVE      #$0000,SR
-          JMP       (A5)
+SAVREGS   MOVE.L    A6,-(A7)            ; Save the job's base address
+          MOVE.L    $28064,A6           ; SV_JBPNT - current job pointer
+          MOVE.L    (A6),A6             ; Base address of current job
+          MOVEM.L   D0-D7/A0-A5,$20(A6) ; Save job's registers in job header
+          MOVE.L    (A7)+,$58(A6)       ; Save job's A6 = base address
+          MOVE      USP,A1              ; Get the job's USP
+          MOVE.L    A1,$5C(A6)          ; Save job's A7 stack pointer
+          MOVE.L    (A7)+,A5            ; Return address of SAVEREGS caller
+          MOVE.W    (A7)+,$60(A6)       ; Job's Status Register
+          MOVE.L    (A7)+,$62(A6)       ; Job's Program Counter
+          MOVE.L    $28064,A0           ; SV_JBPNT - current job pointer
+          MOVE.L    SYSVARS,A6          ; Reset A6 to monitor's dataspace
+          BSR       EXAM_REGS           ; ???? -> TODO
+          LEA       DATASPACE(A6),A0    ; The monitor's top of stack
+          MOVE      A0,USP              ; Reset our own stack
+          MOVE.L    $28064,A0           ; We did this above, then broke it!
+          MOVE.L    OWN_JB(A6),A2       ; The monitor's job id
+          CMPA.L    A0,A2               ; Is the current job the monitor?
+          BEQ.S     GO_MON              ; Yes. Skip.
+
+*--------------------------------------------------------------------
+* Suspend the monitored job, assuming it's not the monitor itself and
+* inddicate nobody is waiting for this job.
+*--------------------------------------------------------------------
+          MOVE.L    (A0),A0             ; No, get base address of job
+          MOVE.W    #-1,$14(A0)         ; JB_STAT - Flag job as suspended
+          SF        $17(A0)             ; JB_WFLAG - flag no-one waiting
+
+GO_MON    MOVE.L    A2,$28064           ; Make the monitor the current job
+          MOVE.L    (A2),A2             ; Base address of the monitor
+          CLR.W     $14(A2)             ; JB_STAT - Flag it as active
+          MOVE.L    $0C(A2),D0          ; JB_HOLD - location to clear on exit
+          BEQ.S     GO_MON1             ; Not needed, skip
+          MOVE.L    D0,A2               ; Get the location to be cleared
+          SF        (A2)                ; Clear the required location
+GO_MON1   MOVE      #$0000,SR           ; Wipe everything from SR
+          JMP       (A5)                ; Effectively, RTS to the caller
 
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
@@ -514,85 +565,128 @@ ADDVAL_1  ADD.L     D1,D4
           RTS
 
 *--------------------------------------------------------------------
+* Convert a buffer of characters from hexadecimal to a value in D1.
+* If there are invalid characters then return an error in D0.
+* Entry here required the buffer start address in A1. This is not in
+* standard QDOS string format, the characters are converted until a
+* ???? -> TODO is detected.
 *--------------------------------------------------------------------
-READHEX   MOVEQ     #0,D1
-          MOVEQ     #0,D0
-          MOVE.L    A1,A0
-GHEXLP    MOVE.B    (A1),D0
+READHEX   MOVEQ     #0,D1           ; Result in D1
+          MOVEQ     #0,D0           ; Clear out D0
+          MOVE.L    A1,A0           ; Save the buffer start address
+
+*--------------------------------------------------------------------
+* Hex to Decimal conversion loop.
+*--------------------------------------------------------------------
+GHEXLP    MOVE.B    (A1),D0         ; Grab the first character
           CMPI.B    #'0',D0
-          BLT.S     GHEX_END
+          BLT.S     GHEX_END        ; Lower than '0' means done
           CMPI.B    #'9',D0
-          BLE.S     GHEXADD
+          BLE.S     GHEXADD         ; '0' - '9' are ok.
           CMPI.B    #'A',D0
-          BLT.S     GHEX_END
-          ANDI.B    #$DF,D0
+          BLT.S     GHEX_END        ; Lower than 'A' means done
+          ANDI.B    #$DF,D0         ; Convert to upper case
           CMPI.B    #'F',D0
-          BGT.S     GHEX_END
-          SUBQ.B    #7,D0
-GHEXADD   SUBI.B    #'0',D0
-          LSL.L     #4,D1
-          ADD.L     D0,D1
-          ADDQ.W    #1,A1
-          BRA.S     GHEXLP
-GHEX_END  CMPA.L    A0,A1
-          BEQ.S     GHEX_ERR
-          MOVEQ     #0,D0
-          RTS
-
-GHEX_ERR  MOVEQ     #-17,D0
-          RTS
+          BGT.S     GHEX_END        ; Higher than 'F' means done
+          SUBQ.B    #7,D0           ; Adjust for letters
 
 *--------------------------------------------------------------------
+* The character in D0 is '0'-'9' or ('A' - 7) - ('F' - 7). Convert it
+* to binary, and tally it in the running total for the conversion.
 *--------------------------------------------------------------------
-READDEC   MOVEQ     #0,D1
-          MOVEQ     #0,D0
-          MOVE.L    A1,A0
-RDEC_LOOP MOVE.B    (A1),D0
-          SUBI.B    #'0',D0
-          BLT.S     GHEX_END
-          CMPI.B    #10,D0
-          BGE.S     GHEX_END
-          MOVE.L    D1,D2
-          LSL.L     #2,D1
-          ADD.L     D2,D1
-          ADD.L     D1,D1
-          ADD.L     D0,D1
-          ADDQ.W    #1,A1
-          BRA.S     RDEC_LOOP
+GHEXADD   SUBI.B    #'0',D0         ; DeASCIIfy the character
+          LSL.L     #4,D1           ; Total *= 16
+          ADD.L     D0,D1           ; Total += D1
+          ADDQ.W    #1,A1           ; Next character
+          BRA.S     GHEXLP          ; Go around until done
 
 *--------------------------------------------------------------------
+* Check if we actually converted anything, if we did convert then we
+* are done with no errors, return D1 as the value converted and D0
+* showing no errors.
 *--------------------------------------------------------------------
-READBIN   MOVEQ     #0,D1
-          MOVEQ     #0,D0
-          MOVE.L    A1,A0
-RDBIN_LP  MOVE.B    (A1),D0
-          SUBI.B    #'0',D0
-          BLT       GHEX_END
-          CMPI.B    #1,D0
-          BGT       GHEX_END
-          ADD.L     D1,D1
-          ADD.L     D0,D1
-          ADDQ.W    #1,A1
-          BRA.S     RDBIN_LP
+GHEX_END  CMPA.L    A0,A1           ; Has the buffer changed?
+          BEQ.S     GHEX_ERR        ; Yes, we converted nothing at all
+          MOVEQ     #0,D0           ; No, we are ok, no errors
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
+* Handle errors by returning an error code in D0.
 *--------------------------------------------------------------------
-*PROMPT WINDOW HANDLER
+GHEX_ERR  MOVEQ     #-17,D0         ; Error in expression
+          RTS                       ; Done
 
-DSPROMPT  MOVE.L    PROMPTWND(A6),A0
-          MOVEQ     #-1,D3
+*--------------------------------------------------------------------
+* Read a decimal number from the user's input into a binary value in
+* D1. Entry here requires that A1 be pointing at the first character
+* in the buffer to be converted. The buffer holds characters and only
+* '0' - '9' are permitted. Anything else is an error.
+*--------------------------------------------------------------------
+READDEC   MOVEQ     #0,D1           ; Result in D1
+          MOVEQ     #0,D0           ; Clear out D0
+          MOVE.L    A1,A0           ; Save start character address
+
+*--------------------------------------------------------------------
+* The main character to decimal conversion loop.
+*--------------------------------------------------------------------
+RDEC_LOOP MOVE.B    (A1),D0         ; Grab the first character
+          SUBI.B    #'0',D0         ; DeASCIIfy it - 0 - 9 only
+          BLT.S     GHEX_END        ; Was < '0' - we are done here
+          CMPI.B    #10,D0          ; End of input? (or > 9)
+          BGE.S     GHEX_END        ; Yes, we are done here
+          MOVE.L    D1,D2           ; Total saved
+          LSL.L     #2,D1           ; Total *= 4
+          ADD.L     D2,D1           ; Total => Total * 5
+          ADD.L     D1,D1           ; Total => Total * 10
+          ADD.L     D0,D1           ; Add in current digit
+          ADDQ.W    #1,A1           ; Next character in buffer
+          BRA.S     RDEC_LOOP       ; Go around again
+
+*--------------------------------------------------------------------
+* Read a binary number from the user's input into a binary value in
+* D1. Entry here requires that A1 be pointing at the first character
+* in the buffer to be converted. The buffer holds characters and only
+* '0' - '1' are permitted. Anything else is an error.
+*--------------------------------------------------------------------
+READBIN   MOVEQ     #0,D1           ; Result in D1
+          MOVEQ     #0,D0           ; Clear D0 for working
+          MOVE.L    A1,A0           ; Save first character address
+
+*--------------------------------------------------------------------
+* The main character to binary conversion loop.
+*--------------------------------------------------------------------
+RDBIN_LP  MOVE.B    (A1),D0         ; Grab a character
+          SUBI.B    #'0',D0         ; DeASCIIfy it - 0 & 1 only
+          BLT       GHEX_END        ; Lower than 0, we are done here
+          CMPI.B    #1,D0           ; Got a 1?
+          BGT       GHEX_END        ; Higher, we are done here
+          ADD.L     D1,D1           ; Total *= 2
+          ADD.L     D0,D1           ; Add new digit
+          ADDQ.W    #1,A1           ; Next character
+          BRA.S     RDBIN_LP        ; Go around again
+
+*--------------------------------------------------------------------
+* PROMPT WINDOW HANDLER
+* Clears the prompt window, sets the desired character sizes and
+* displays the usual prompt message about F1, F2 and F3 etc.
+*--------------------------------------------------------------------
+DSPROMPT  MOVE.L    PROMPTWND(A6),A0    ; PROMPT window ID
+          MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          MOVEQ     #1,D1
-          MOVEQ     #0,D2
+          TRAP      #3              ; CLS PROMPT window
+
+          MOVEQ     #1,D1           ; 8 Pixels wide
+          MOVEQ     #0,D2           ; 10 Pixels high
           MOVEQ     #SD_SETSZ,D0
-          TRAP      #3
-          LEA       PROMPTMSG,A1
-          MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          RTS
+          TRAP      #3              ; Set character sizes
+
+          LEA       PROMPTMSG,A1    ; Message to print
+          MOVE.W    UT_MTEXT,A2     
+          JSR       (A2)            ; print it
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
+* This message should be visible in the PROMPT window at all times.
 *--------------------------------------------------------------------
 PROMPTMSG DC.W      45
           DC.B      'F1 = Help  F2 = Memory Dump  F3 = Disassemble'
@@ -934,66 +1028,128 @@ INTL7MSG  DC.W      18
           DS.W      0
 
 *--------------------------------------------------------------------
+* Interrupt Level 7 handler.
+* If this gets called, the chances are the QL is locked up as the
+* interrupt causes communications with the 8049 to be reset. As the 
+* code below mucks about in hardware registers, you better know what
+* these are:
+*
+* $18000 PC_CLOCK - Real Time Clock in seconds (Long word).
+* $18002 PC_TCTRL - Transmit Control.
+* $18003 PC_IPCWR - IPC Write.
+* $18020 PC_MCTRL - Microdrive control/status & IPC status.
+* $18020 PC_IPCRD - IPC Read (Same as above.)
+* $18021 PC_INTR  - Interrupt Control/Status.
+* $18022 PC_TDATA - Transmit Data.
+* $18022 PC_TRAK1 - Microdrive Read Track 1.
+* $18023 PC_TRAK2 - Microdrive Read Track 2.
+* $18063 MC_STAT  - Display Control.
+*
+* Of course, it's not as easy as that. These bytes have different
+* functions when read from that when written! So, here they are:
+*
+* ADDR      NAME        READ FUNCTION           WRITE FUNCTION
+  
+* $18000    PC_CLOCK    RTC byte 0.             RTC Reset.
+* $18001                RTC byte 1.             RTC step.
+* $18002    PC_TCTRL    RTC byte 2.             Transmit Control.
+* $18003    PC_IPCWR    RTC byte 3.             IPC Link Control.
+* $18020    PC_MCTRL    MDV/RS232C Status.      MDV Control.
+* $18021    PC_INTR     Interrupt/IPC Status.   Interrupt Control.  
+* $18022    PC_TRAK1    MDV Data (Track 1).     MDC/RS232C Data.  
+* $18023    PC_TRAK2    MDV Data (Track 2).     Display Control.
+*
+* For more information, you need the QDOS Technical Reference.
 *--------------------------------------------------------------------
-EXINTL7   MOVE.L    A3,-(A7)
-          LEA       $18020,A3
-          SF        -$1E(A3)
-          MOVE.L    #$061F0000,(A3)
-          MOVE.B    #$1F,1(A3)
-          MOVE.B    #1,-$1D(A3)
-          MOVE.L    (A7)+,A3
-          JSR       SAVREGS
-          LEA       INTL7MSG,A1
-          BRA.S     MAINERR1
+EXINTL7   MOVE.L    A3,-(A7)        ; Save A3 for a bit
+          LEA       $18020,A3       ; Microdrive/IPC control/status
+          SF        -$1E(A3)        ; $18002 Transmit control ???? -> TODO
+          MOVE.L    #$061F0000,(A3) ; $18020-$18023           ???? -> TODO
+          MOVE.B    #$1F,1(A3)      ; Hasn't this just been done?
+          MOVE.B    #1,-$1D(A3)     ; $18003 PC_IPCWR - ???? -> TODO
+          MOVE.L    (A7)+,A3        ; Restore A3
+          JSR       SAVREGS         ; Save monitored job's registers
+          LEA       INTL7MSG,A1     ; Message to print
+          BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
+* Address Error handler.
+* Tidy the additional data off the SSP.
+* Save the registers - so you can hopefully see which one caused the
+* exception - then print an address error message before hitting the
+* main loop again.
 *--------------------------------------------------------------------
-EXADDERR  ADDQ.W    #8,A7
-          JSR       SAVREGS
-          LEA       ADDERRMSG,A1
-          BRA.S     MAINERR1
+EXADDERR  ADDQ.W    #8,A7           ; Point at the SR on the SSP
+          JSR       SAVREGS         ; Save REGS and reschedule
+          LEA       ADDERRMSG,A1    ; Message to print
+          BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
+* Illegal Instruction handler.
+* Save the registers.
+* Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
-EXILLINST JSR       SAVREGS
-          LEA       ILLINSMSG,A1
-          BRA.S     MAINERR1
+EXILLINST JSR       SAVREGS         ; Save REGS and reschedule
+          LEA       ILLINSMSG,A1    ; Message to print
+          BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
+* Divide by Zero handler.
+* Save the registers.
+* Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
-EXDIVZER  JSR       SAVREGS
-          LEA       DIVZERMSG,A1
-          BRA.S     MAINERR1
+EXDIVZER  JSR       SAVREGS         ; Save REGS and reschedule
+          LEA       DIVZERMSG,A1    ; Message to print
+          BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
+* CHK handler.
+* Save the registers.
+* Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
-EXCHK     JSR       SAVREGS
-          LEA       CHKMSG,A1
-          BRA.S     MAINERR1
+EXCHK     JSR       SAVREGS         ; Save REGS and reschedule
+          LEA       CHKMSG,A1       ; Message to print
+          BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
+* TRAPV handler.
+* Save the registers.
+* Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
-EXTRAPV   JSR       SAVREGS
-          LEA       TRAPVMSG,A1
-          BRA.S     MAINERR1
+EXTRAPV   JSR       SAVREGS         ; Save REGS and reschedule
+          LEA       TRAPVMSG,A1     ; Message to print
+          BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
+* Privilege Violation handler.
+* Save the registers.
+* Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
-EXPRIVV   JSR       SAVREGS
-          LEA       PRIVMSG,A1
-          BRA.S     MAINERR1
+EXPRIVV   JSR       SAVREGS         ; Save REGS and reschedule
+          LEA       PRIVMSG,A1      ; Message to print
+          BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
 * The code here is executed on any trap #5 to trap #15 by this job,
 * the monitor, not the job being monitored. It is also ???? -> TODO
+*
+* Save the registers.
+* Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
-EXBRKPNT  JSR       SAVREGS
-          SUBQ.L    #2,IM_PC(A6)
-          SUBQ.L    #2,MEMPTR(A6)
-          BSR.S     REMOVEBRK
-          LEA       BRKPNTMSG,A1
+EXBRKPNT  JSR       SAVREGS         ; Save REGS and reschedule
+          SUBQ.L    #2,IM_PC(A6)    ; ???? -> TODO
+          SUBQ.L    #2,MEMPTR(A6)   ; ???? -> TODO
+          BSR.S     REMOVEBRK       ; ???? -> TODO
+          LEA       BRKPNTMSG,A1    ; Message to print
+
+*--------------------------------------------------------------------
+* I get the impression this is simply here to allow a BRA.S from the
+* above. I could be wrong...
+*--------------------------------------------------------------------
 MAINERR1  BRA.S     MAIN_ERR
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 REMOVEBRK MOVEQ     #BKPTABSIZ-1,D0
           LEA       BRKPTAB(A6),A0
           MOVE.L    MEMPTR(A6),A1
@@ -1012,34 +1168,47 @@ UNDO_BRK  BSR.S     REMOVEBRK
           BRA.S     MAIN_REG
 
 *--------------------------------------------------------------------
+* This is a blank message of zero characters in length. 
 *--------------------------------------------------------------------
-*MAIN EXECUTION LOOP
-
 NULMSG    DC.W      0
-MAIN_REST MOVE.L    SYSVARS,A6
-          LEA       DATASPACE(A6),A7
-          TRAP      #0
-          MOVE.L    $28068,A0
-          BSR       EXAM_REGS
-          ANDI      #$DFFF,SR
-          CLR.L     MEMPTR(A6)
-          LEA       NULMSG,A1
-MAIN_ERR  MOVEQ     #0,D1
-          MOVEQ     #-1,D2
+
+*--------------------------------------------------------------------
+* MAIN EXECUTION LOOP
+* Reset A6 to point at our (the monitor's) data space then set the
+* stack appropriately before jumping into supervisor mode.
+*--------------------------------------------------------------------
+MAIN_REST MOVE.L    SYSVARS,A6      ; Address of our dataspace
+          LEA       DATASPACE(A6),A7    ; Set up our stack
+          TRAP      #0              ; Into supervisor mode
+          MOVE.L    $28068,A0       ; SV_JBBAS - base of job table
+          BSR       EXAM_REGS       ; ???? -> TODO
+          ANDI      #$DFFF,SR       ; Exit supervisor mode
+          CLR.L     MEMPTR(A6)      ; ???? -> TODO
+          LEA       NULMSG,A1       ; ???? -> TODO
+
+*--------------------------------------------------------------------
+* We enter here from the exception handlers above, amongst other
+* places. ???? -> TODO
+*--------------------------------------------------------------------
+MAIN_ERR  MOVEQ     #0,D1           ; Set mode 4
+          MOVEQ     #-1,D2          ; Don't care (Read display type)
           MOVEQ     #MT_DMODE,D0
-          TRAP      #1
-          MOVE.L    CMDWND(A6),A0
-          MOVE.L    A1,A2
-          MOVEQ     #-1,D3
-          MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          MOVEQ     #1,D1
-          MOVEQ     #0,D2
+          TRAP      #1              ; MODE 4
+
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVE.L    A1,A2           ; NULMSG pointer
+          MOVEQ     #-1,D3          ; Timeout
+          MOVEQ     #SD_CLEAR,D0    ; CLS
+          TRAP      #3              ; Clear COMMAND window
+
+          MOVEQ     #1,D1           ; 8 Pixels wide
+          MOVEQ     #0,D2           ; 10 Pixels high
           MOVEQ     #SD_SETSZ,D0
-          TRAP      #3
-          MOVE.L    A2,A1
-          MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
+          TRAP      #3              ; Set font size
+
+          MOVE.L    A2,A1           ; NULMSG pointer
+          MOVE.W    UT_MTEXT,A2     
+          JSR       (A2)            ; Print a zero length message
 
 MAIN_LOOP BSR       DSPROMPT
 MAIN_REG  BSR       DSPREG
@@ -1217,28 +1386,29 @@ CMDTAB    DC.W      $C0             ; Arrow LEFT Change Memory Pointer
 *--------------------------------------------------------------------
 * Arrow LEFT - decrement current memory pointer.
 *--------------------------------------------------------------------
-LEFT      MOVEQ     #-1,D1
+LEFT      MOVEQ     #-1,D1          ; Decrement by 1
           BRA.S     AMEMPTR
 
 *--------------------------------------------------------------------
 * Arrow RIGHT - increment current memory pointer.
 *--------------------------------------------------------------------
-RIGHT     MOVEQ     #1,D1
+RIGHT     MOVEQ     #1,D1           ; Increment by 1
           BRA.S     AMEMPTR
 
 *--------------------------------------------------------------------
 * Arrow DOWN - decrement current memory pointer by 8.
 *--------------------------------------------------------------------
-LEFT8     MOVEQ     #-8,D1
+LEFT8     MOVEQ     #-8,D1          ; Decrement by 8
           BRA.S     AMEMPTR
 
 *--------------------------------------------------------------------
 * Arrow UP - increment current memory pointer by 8.
 *--------------------------------------------------------------------
-RIGHT8    MOVEQ     #8,D1
+RIGHT8    MOVEQ     #8,D1           ; Increment by 8
           BRA.S     AMEMPTR
 
 *--------------------------------------------------------------------
+* Entry here means we prompt for an address, before dropping in.
 *--------------------------------------------------------------------
 ADD_MEM   BSR       GETADDR1
 
@@ -1248,8 +1418,8 @@ ADD_MEM   BSR       GETADDR1
 * the current address. The MEMORY WINDOW is redrawn to display the
 * new data - 8 bytes below and 8 bytes above the current MP.
 *--------------------------------------------------------------------
-AMEMPTR   ADD.L     D1,MEMPTR(A6)
-          BRA       MAIN_MEM
+AMEMPTR   ADD.L     D1,MEMPTR(A6)   ; Adjust the memroy pointer
+          BRA       MAIN_MEM        ; And go round again
 
 *--------------------------------------------------------------------
 * Q: Quit the program.
@@ -1354,6 +1524,7 @@ SETPC_END BCLR      #0,D1
 SETPCRTS  RTS
 
 *--------------------------------------------------------------------
+* X: Execute current instruction.
 *--------------------------------------------------------------------
 XECUTE    MOVE.L    MEMPTR(A6),D1
           BCLR      #0,D1
@@ -1369,6 +1540,7 @@ JUMP      BSR.S     SET_PC
 JUMP_2    JMP       RESTREGS
 
 *--------------------------------------------------------------------
+* C: Call subroutine.
 *--------------------------------------------------------------------
 CALL      BSR.S     SET_PC
           BNE       HEXERR
@@ -1392,6 +1564,7 @@ CALL_RET  MOVE      SR,-(A7)
           BRA       MAIN_LOOP
 
 *--------------------------------------------------------------------
+* T: Trace current instruction.
 *--------------------------------------------------------------------
 TRACE     MOVE.L    MEMPTR(A6),D1
           BCLR      #0,D1
@@ -1403,31 +1576,58 @@ EXTRACE   BCLR      #7,(A7)
           JSR       SAVREGS
           BRA       MAIN_LOOP
 
-BRKP_SUB  MOVE.L    MEMPTR(A6),D1
-BRKP_1    BCLR      #0,D1
-          MOVEQ     #BKPTABSIZ-1,D0
-          LEA       BRKPTAB(A6),A1
-BRKP_LOOP TST.L     (A1)
-          BEQ.S     ENTBRKP
-          ADDQ.L    #6,A1
-          DBF       D0,BRKP_LOOP
-          LEA       BRKFULMSG,A1
+*--------------------------------------------------------------------
+* Set breakpoint helper. The breakpoints are stored in a table of
+* a certain size, in the format:
+*
+* Address.L 
+* Instruction.W
+* ...
+*
+* We need to keep the instruction word safe as we are setting a TRAP
+* #15 instruction at the breakpoint address to cause a jump into the
+* monitor when executed.
+*--------------------------------------------------------------------
+BRKP_SUB  MOVE.L    MEMPTR(A6),D1   ; ???? -> TODO
+
+BRKP_1    BCLR      #0,D1           ; Better be even
+          MOVEQ     #BKPTABSIZ-1,D0 ; Maximum number of breakpoints
+          LEA       BRKPTAB(A6),A1  ; Breakpoint table
+
+*--------------------------------------------------------------------
+* Loop through the breakpoint table looking for a free slot. If none
+* are available, display an error message and go back to the main
+* loop aand await a further command.
+*--------------------------------------------------------------------
+BRKP_LOOP TST.L     (A1)            ; Free slot?
+          BEQ.S     ENTBRKP         ; Yes, add the new breakpoint
+          ADDQ.L    #6,A1           ; No, skip to the next slot
+          DBF       D0,BRKP_LOOP    ; And check that one too
+
+          LEA       BRKFULMSG,A1    ; No more breakpoints message
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          ADDQ.L    #4,A7
-          BRA       MAIN_1
-ENTBRKP   MOVE.L    D1,(A1)+
-          MOVE.L    D1,A0
-          MOVE.W    (A0),(A1)
-          MOVE.W    #$4E4F,(A0)
-          RTS
+          JSR       (A2)            ; Print it
+          ADDQ.L    #4,A7           ; Tidy the return address
+          BRA       MAIN_1          ; Back into the main loop
 
 *--------------------------------------------------------------------
+* We have found an empty slot in the breakpoint table, store the new
+* breakpoint address in the slot.
 *--------------------------------------------------------------------
-BREAKPNT  BSR.S     BRKP_SUB
-BRKP_END  BRA       MAIN_LOOP
+ENTBRKP   MOVE.L    D1,(A1)+        ; Save the breakpoint address
+          MOVE.L    D1,A0           ; Copy the address
+          MOVE.W    (A0),(A1)       ; Save the instruction word
+          MOVE.W    #$4E4F,(A0)     ; Insert a breakpoint TRAP #15
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
+* B: Set Breakpoint.
+*--------------------------------------------------------------------
+BREAKPNT  BSR.S     BRKP_SUB        ; Set the breakpoint, or barf
+BRKP_END  BRA       MAIN_LOOP       ; Breakpoint set, go around again
+
+*--------------------------------------------------------------------
+* Error when we set too many breakpoints.
 *--------------------------------------------------------------------
 BRKFULMSG DC.W      21
           DC.B      10,'Too many breakpoints'
@@ -1535,6 +1735,7 @@ MEMDUMP   MOVEQ     #SD_CURS,D0
           MOVEQ     #SD_CLEAR,D0
           TRAP      #3
           MOVE.L    MEMPTR(A6),A4
+
 MD_PAGE   MOVEQ     #18,D7
 MD_LOOP   MOVE.L    A4,D1
           TST.B     RELMOD(A6)
@@ -1547,7 +1748,9 @@ MD_LOOP   MOVE.L    A4,D1
           ANDI.B    #$F0,D1
           ADD.L     BASE_PNT(A6),D1
           BRA.S     MD3
+
 MD2       ANDI.B    #$F0,D1
+
 MD3       MOVE.L    D1,A4
           BSR.S     DO_MEM
           MOVE.L    AUXWND(A6),A0
@@ -1610,58 +1813,101 @@ MD_MSG2   DC.W      16
 *--------------------------------------------------------------------
 * A: Alter memory.
 *--------------------------------------------------------------------
-ALT_MEM   MOVEQ     #10,D1
+ALT_MEM   MOVEQ     #10,D1          ; Newline character
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          MOVE.L    MEMPTR(A6),A4
-AM_LOOP   LEA       DISBUF(A6),A0
-          MOVE.L    A4,D1
-          JSR       CN_ADDR
-          MOVE.B    #':',(A0)+
-          MOVE.B    #' ',(A0)+
-          MOVE.L    CMDWND(A6),A0
-          MOVEQ     #-1,D3
-          LEA       DISBUF(A6),A1
-          MOVEQ     #7,D2
+          TRAP      #3              ; Print it
+          MOVE.L    MEMPTR(A6),A4   ; Current memory pointer
+
+*--------------------------------------------------------------------
+* Main loop for the Alter Memory command.
+*--------------------------------------------------------------------
+AM_LOOP   LEA       DISBUF(A6),A0   ; Output buffer address
+          MOVE.L    A4,D1           ; Current memory pointer
+          JSR       CN_ADDR         ; Show 5 bytes only of the address
+          MOVE.B    #':',(A0)+      ; Then a colon
+          MOVE.B    #' ',(A0)+      ; Then a space
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVEQ     #-1,D3          ; Timeout
+          LEA       DISBUF(A6),A1   ; Data to print
+          MOVEQ     #7,D2           ; Data size 5 bytes + colon + space
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          BSR.S     HEX_LINE
+          TRAP      #3              ; Print address, colon, space
+          BSR.S     HEX_LINE        ; ???? -> TODO
           BEQ       MAIN_LOOP
           MOVE.L    A4,MEMPTR(A6)
           BRA.S     AM_LOOP
 
-HEX_LINE  LEA       DISBUF+1(A6),A1
-          MOVEQ     #DISBUFLEN-1,D2
-          MOVEQ     #IO_FLINE,D0
-          TRAP      #3
-          SUBQ.W    #1,D1
-          BEQ.S     HEXL_END
-          LEA       DISBUF+1(A6),A1
-          MOVE.L    A4,A5
-          LSR.W     #1,D1
-          BCC.S     HL_1
-          MOVE.B    #'0',-(A1)
-          ADDQ.W    #1,D1
-HL_1      MOVE.W    D1,D4
-GET_HLINE MOVE.B    2(A1),D6
-          MOVE.B    #10,2(A1)
-          JSR       READHEX
-          CMPI.B    #10,(A1)
-          BNE.S     HEXL_ERR
-          MOVE.B    D1,(A5)+
-          MOVE.B    D6,(A1)
-          CMPI.B    #10,D6
-          BNE.S     GET_HLINE
-          MOVE.L    A5,A4
-          MOVE.W    D4,D1
-HEXL_END  RTS
+*--------------------------------------------------------------------
+* Fetch a line of input from the user. It should be valid hexadecimal
+* characters. For each two bytes input, convert to hex and store in
+* memory at the current memory pointer and beyond. The format of the
+* input buffer will be either:
+*
+* hhhhhh<10> for an even number of hex characters, or
+*  hhhhh<10> for an odd number.
+*
+* In the latter case, the buffer is preloaded with a leading zero to
+* give:
+*
+* 0hhhhh<10> 
+*
+* Thus, giving a valid, even number of hex to convert.
+*--------------------------------------------------------------------
+HEX_LINE  LEA       DISBUF+1(A6),A1 ; Buffer start - leaves a space
+;                                   ; for a leading zero if required
+          MOVEQ     #DISBUFLEN-1,D2 ; Maximum buffer size
+          MOVEQ     #IO_FLINE,D0    ; Prepare to fetch data
+          TRAP      #3              ; Fetch!
+          SUBQ.W    #1,D1           ; Did we get anything?
+          BEQ.S     HEXL_END        ; No, just a newline - done.
 
-HEXL_ERR  ADDQ.W    #4,A7
-          LEA       BADHEXMSG,A1
-          MOVE.L    CMDWND(A6),A0
+*--------------------------------------------------------------------
+* Prefix the odd number of hex charas with a zero character, if we
+* read in an odd number of characters. I like this!
+*--------------------------------------------------------------------
+          LEA       DISBUF+1(A6),A1 ; Buffer start address 
+          MOVE.L    A4,A5           ; Copy current memory pointer
+          LSR.W     #1,D1           ; Bytes in input /2
+          BCC.S     HL_1            ; It was an even length input
+          MOVE.B    #'0',-(A1)      ; Odd length, high nibble is always '0'
+          ADDQ.W    #1,D1           ; Account for it
+
+HL_1      MOVE.W    D1,D4           ; Bytes to decode from hex characters
+
+*--------------------------------------------------------------------
+* Split the input into pairs of hex characters followed by a newline
+* then convert the pair to a byte value to store in memory. On exit
+* from READHEX the buffer pointer should be looking at a newline - 
+* anything else is an invalid hex character and leads to an error.
+*--------------------------------------------------------------------
+GET_HLINE MOVE.B    2(A1),D6        ; Save third character = do byte pairs
+          MOVE.B    #10,2(A1)       ; Insert a newline instead      
+          JSR       READHEX         ; Convert from hex to a byte in D1
+          CMPI.B    #10,(A1)        ; Valid?
+          BNE.S     HEXL_ERR        ; No, do error handling
+          MOVE.B    D1,(A5)+        ; Alter one byte in memory
+          MOVE.B    D6,(A1)         ; Restore the saved byte 
+          CMPI.B    #10,D6          ; Are we done yet?
+          BNE.S     GET_HLINE       ; No, keep going
+          MOVE.L    A5,A4           ; A4 is the new current memory pointer
+          MOVE.W    D4,D1           ; D1 is the number of bytes stored.
+
+HEXL_END  RTS                       ; Done
+
+*--------------------------------------------------------------------
+* Handle invalid hexadecimal characters in the user's input.
+*--------------------------------------------------------------------
+HEXL_ERR  ADDQ.W    #4,A7           ; Caller address tidied away
+          LEA       BADHEXMSG,A1    ; MEssage to print
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          BRA       MAIN_LOOP
+          JSR       (A2)            ; Print the message
+          BRA       MAIN_LOOP       ; Back to main loop
+
+*--------------------------------------------------------------------
+* This is the message to print when bad hex characters are found in
+* the user's input.
+*--------------------------------------------------------------------
 BADHEXMSG DC.B      0,7,'Bad Hex'
           DS.W      0
 
