@@ -40,9 +40,9 @@ AUXWND    EQU       178             Auxiliary Window ID
 * the job table.
 *--------------------------------------------------------------------
 OWN_JB    EQU       182             ???? -> TODO
-JBPNT     EQU       186             ???? -> TODO
-MATHSTK   EQU       194             Temp top of 16 byte maths stack (194 - 178)
+JBPNT     EQU       186             Pointer to current job's job table entry
 MEMPTR    EQU       190             Current memory address
+MATHSTK   EQU       194             Temp 4 byte maths stack (198 - 194)
 REGPTR    EQU       198             Current register pointer
 
 *--------------------------------------------------------------------
@@ -145,14 +145,14 @@ START2    ADDA.L    A4,A6           ; A6 = Start of data space
           MOVE.L    A6,(A1)         ; Save A6 in our job header
 
 *--------------------------------------------------------------------
-* Enter supervisor mode and pick our own Job table entry (not address
-* - the entry/slot number) and save it in OWN_JB. Then we copy the
+* Enter supervisor mode and pick our own Job table entry (the address
+* not the entry/slot number) and save it in OWN_JB. Then we copy the
 * registers, SR and PC of what is probably SuperBASIC, as well as the
 * SSP into our storage prior to displaying the main screen full of
 * the job's data.
 *--------------------------------------------------------------------
           TRAP      #0              ; Supervisor mode
-          MOVE.L    $28064,OWN_JB(A6)   ; SV_JBPNT = Own Job id
+          MOVE.L    $28064,OWN_JB(A6)   ; SV_JBPNT = Current job's entry
           MOVE.L    $28068,A0       ; SV_JBBAS = Start of Job Table  
           BSR       EXAM_REGS       ; Copy registers etc to storage
           ANDI      #$DFFF,SR       ; Clear Supervisor bit
@@ -356,20 +356,20 @@ WNDPRMS   DC.W      16
 *--------------------------------------------------------------------
 * Window parameters for the main windows:
 *
-* BORDER COLOUR = RED
-* BORDER WIDTH = 1
-* PAPER/STRIP COLOUR = BLACK
-* INK COLOUR = WHITE
+* Border Colour = Red
+* Border Width = 1
+* Paper/Strip Colour = Black
+* Ink Colour = White
 *--------------------------------------------------------------------
 WNDPAR1   DC.B      2,1,0,7
 
 *--------------------------------------------------------------------
 * Window parameters for the help window:
 *
-* BORDER COLOUR = BLACK
-* BORDER WIDTH = 0
-* PAPER/STRIP COLOUR = RED
-* INK COLOUR = WHITE
+* Border Colour = Black
+* Border Width = 0
+* Paper/Strip Colour = Red
+* Ink Colour = White
 *--------------------------------------------------------------------
 WNDPAR2   DC.B      0,0,2,7
 
@@ -430,7 +430,7 @@ SIGNON    DC.W      39
 * 0(A7) = Return address.L
 *--------------------------------------------------------------------
 SAVREGS   MOVE.L    A6,-(A7)            ; Save the job's base address
-          MOVE.L    $28064,A6           ; SV_JBPNT - current job pointer
+          MOVE.L    $28064,A6           ; SV_JBPNT - current job's entry
           MOVE.L    (A6),A6             ; Base address of current job
           MOVEM.L   D0-D7/A0-A5,$20(A6) ; Save job's registers in job header
           MOVE.L    (A7)+,$58(A6)       ; Save job's A6 = base address
@@ -439,7 +439,7 @@ SAVREGS   MOVE.L    A6,-(A7)            ; Save the job's base address
           MOVE.L    (A7)+,A5            ; Return address of SAVEREGS caller
           MOVE.W    (A7)+,$60(A6)       ; Job's Status Register
           MOVE.L    (A7)+,$62(A6)       ; Job's Program Counter
-          MOVE.L    $28064,A0           ; SV_JBPNT - current job pointer
+          MOVE.L    $28064,A0           ; SV_JBPNT - current job's entry
           MOVE.L    SYSVARS,A6          ; Reset A6 to monitor's dataspace
           BSR       EXAM_REGS           ; Copy registers etc to storage
           LEA       DATASPACE(A6),A0    ; The monitor's top of stack
@@ -468,42 +468,80 @@ GO_MON1   MOVE      #$0000,SR           ; Wipe everything from SR
           JMP       (A5)                ; Effectively, RTS to the caller
 
 *--------------------------------------------------------------------
+* We get here in Supervisor mode.
+*
+* Check the current job to see if it is active, or the monitor, error
+* out in either case.
+* Fiddle about in the current job's header to set the following:
+*    Job is being waited on by another
+*    The waiting job is the monitor
+*    Priority is set, if not, set it to 32.
+* Fiddle about in our own job's header to set the following:
+*    Job is waiting for another to complete
+*    Set the PC to be MAIN_REST on reactivation
+*    Clear the SR.
 *--------------------------------------------------------------------
-RESTREGS  MOVEQ     #0,D0
-          TRAP      #1
-          TRAP      #0
-          MOVE.L    JBPNT(A6),A0
-          TST.B     (A0)
-          BLT.S     RR_BADJB
-          MOVE.L    OWN_JB(A6),A2
-          CMPA.L    A0,A2
-          BEQ.S     RR_BADJB
-          MOVE.L    A0,$28064
-          MOVE.L    (A0),A0
-          MOVE.L    (A2),A2
-          MOVE.W    #-2,$14(A2)
-          LEA       MAIN_REST,A1
-          MOVE.L    A1,$62(A2)
-          CLR.W     $60(A2)
-          TAS       $17(A0)
-          MOVE.L    D1,$18(A0)
-          TST.B     $13(A0)
-          BNE.S     REL_JB
-          MOVE.B    #32,$13(A0)
-REL_JB    CLR.W     $14(A0)
-          MOVE.L    IM_PC(A6),-(A7)
-          MOVE.W    IM_SR(A6),-(A7)
-          MOVE.L    IM_USP(A6),A1
-          MOVE      A1,USP
-          MOVEM.L   (A6),D0-D7/A0-A6
-          RTE
-RR_BADJB  ANDI      #$DFFF,SR
-          MOVE.L    CMDWND(A6),A0
-          MOVEQ     #10,D1
-          MOVEQ     #-1,D3
+RESTREGS  MOVEQ     #0,D0               ; MT_INF - Get QDOS information
+          TRAP      #1                  ; Do it
+          TRAP      #0                  ; Supervisor mode
+          MOVE.L    JBPNT(A6),A0        ; Current job's entry in job table
+          TST.B     (A0)                ; Inactive jobs are $FF000000
+          BLT.S     RR_BADJB            ; Inactive, skip
+          MOVE.L    OWN_JB(A6),A2       ; Get our own job table entry
+          CMPA.L    A0,A2               ; Are we looking at ourself?
+          BEQ.S     RR_BADJB            ; Yes, not allowed!
+          MOVE.L    A0,$28064           ; Current job = the monitored one
+          MOVE.L    (A0),A0             ; Address in RAM of monitored job
+          MOVE.L    (A2),A2             ; Our address in RAM
+
+*--------------------------------------------------------------------
+* Show the monitor to be waiting for another job, and set the SR to
+* zero (all off) and the PC = MAIN_REST when we are next reactivated.
+*--------------------------------------------------------------------
+          MOVE.W    #-2,$14(A2)         ; We are waiting for another job
+          LEA       MAIN_REST,A1        ; When the job completes, exit back
+;                                       ; to MAIN_REST in the monitor
+          MOVE.L    A1,$62(A2)          ; Saved in our PC in job header
+          CLR.W     $60(A2)             ; Clear the SR for ourself
+
+*--------------------------------------------------------------------
+* Set the monitored job to have a job (the monitor) waiting on it and
+* make sure that the priority will increment.
+*--------------------------------------------------------------------
+          TAS       $17(A0)             ; Set other job waiting for me
+          MOVE.L    D1,$18(A0)          ; Save our jobid as the waiter
+          TST.B     $13(A0)             ; Will priority increment
+          BNE.S     REL_JB              ; Yes, skip
+          MOVE.B    #32,$13(A0)         ; No, make sure it does
+
+*--------------------------------------------------------------------
+* Ready to release the monitored job. We set it to be active first,
+* then push it's PC and SR onto the supervisor stack ready for the
+* RTE, set it's USP to what it was before we interrupted it with the
+* monitor, restore its registers from our storage and when the RTE
+* fires, the job will run from its PC and with the SR set as per what
+* we put on the SSP.
+*--------------------------------------------------------------------
+REL_JB    CLR.W     $14(A0)             ; Monitored job is now active
+          MOVE.L    IM_PC(A6),-(A7)     ; Monitored job's PC on SSP
+          MOVE.W    IM_SR(A6),-(A7)     ; Monitored job's SR on SSP
+          MOVE.L    IM_USP(A6),A1       ; Monitored job's USP
+          MOVE      A1,USP              ; Saved on the USP
+          MOVEM.L   (A6),D0-D7/A0-A6    ; Restore job's registers
+          RTE                           ; Exit supervisor & release job
+
+*--------------------------------------------------------------------
+* We arrive here if the current job happens to be inactive or if it
+* is the monitor. Clear supervisor mode and display an 'invalid job'
+* error.
+*--------------------------------------------------------------------
+RR_BADJB  ANDI      #$DFFF,SR       ; Clear supervisor mode
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVEQ     #10,D1          ; Newline
+          MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          MOVEQ     #-2,D0
+          TRAP      #3              ; Print newline
+          MOVEQ     #-2,D0          ; Error 'Invalid Job'
           BRA       PRT_ERR         ; Do error message then -> main loop
 
 *--------------------------------------------------------------------
@@ -987,8 +1025,12 @@ DSPADDREG MOVE.W    CN_ITOHL,A2     ; TOS -> HEX.L
 * line of the register display.
 *--------------------------------------------------------------------
 * I THINK that the messing around with A1.W rather than A1.L is down
-* to saving some time, clock cycles etc as the hig word of A1 is zero
+* to saving some time/clock cycles as the high word of A1 is zero
 * when we are doing all this work on the registers display window.
+*
+* Looking in the manual, MOVE.W A1,-(A7) takes 8 clocks plus 1 bus
+* read and one bus write, whereas MOVE.L A1,-(A7) takes 14 clocks 
+* plus 1 bus read and 2 bus writes. (At least on an MC68008.)
 *--------------------------------------------------------------------
 DSPA_SAV  MOVE.W    A1,-(A7)        ; Save register pointer
           MOVEQ     #7,D6           ; There are 8 bytes to convert
@@ -1176,54 +1218,85 @@ REGEND    EQU       *
           DC.W      0
 
 *--------------------------------------------------------------------
+* ALT Arrow: Change Register Pointer.
+*
+* Enter here with D5 = ???? -> TODO.
 *--------------------------------------------------------------------
           SECTION   MON_CODE
 
-*CHANGE REGPTR ROUTINES
+*--------------------------------------------------------------------
+* ALT DOWN: Should move from Dn or An to Dn+1 or An+1.
+*--------------------------------------------------------------------
+RP_ADD1   MOVEQ     #4,D5           ; Offset is 4 bytes
+          BRA.S     RP_ADJ          ; Move to next D/A register  
 
-RP_ADD1   MOVEQ     #4,D5
-          BRA.S     RP_ADJ
-RP_ADD8   MOVEQ     #8*4,D5
-          BRA.S     RP_ADJ
-RP_SUB1   MOVEQ     #-4,D5
-          BRA.S     RP_ADJ
-RP_SUB8   MOVEQ     #-8*4,D5
-RP_ADJ    MOVEQ     #$20,D4
-          BSR.S     DSPREGP
-          MOVE.W    REGPTR(A6),D0
-          MOVEQ     #80,D1
-          ADD.W     D5,D0
-          BGE.S     RP_UPPER
-          ADD.W     D1,D0
+*--------------------------------------------------------------------
+* ALT RIGHT: Should move from Dn to An.
+*--------------------------------------------------------------------
+RP_ADD8   MOVEQ     #8*4,D5         ; Offset is 32 bytes
+          BRA.S     RP_ADJ          ; Move from D to A register
+
+*--------------------------------------------------------------------
+* ALT UP: Should move from Dn or An to Dn-1 or An-1.
+*--------------------------------------------------------------------
+RP_SUB1   MOVEQ     #-4,D5          ; Offset is -4 bytes
+          BRA.S     RP_ADJ          ; Move to previous D/A register
+
+*--------------------------------------------------------------------
+* ALT LEFT: Should move from An -> Dn.
+*--------------------------------------------------------------------
+RP_SUB8   MOVEQ     #-8*4,D5        ; Offset is -32 bytes
+;                                   ; Move from A to D register
+
+*--------------------------------------------------------------------
+* Adjust the pointer position on screen to suit the ALT ARROW key 
+* just pressed to move the register pointer around the screen. Delete
+* it whereever it currently is and redraw it after moving.
+*--------------------------------------------------------------------
+RP_ADJ    MOVEQ     #$20,D4         ; Space as the pointer
+          BSR.S     DSPREGP         ; Delete current '>'
+          MOVE.W    REGPTR(A6),D0   ; Current register pointer
+          MOVEQ     #80,D1          ; ???? -> TODO
+          ADD.W     D5,D0           ; Offset to new register
+          BGE.S     RP_UPPER        ;       
+          ADD.W     D1,D0           ;
+
 RP_UPPER  CMP.W     D1,D0
           BLT.S     RP_STORE
           SUB.W     D1,D0
+
 RP_STORE  MOVE.W    D0,REGPTR(A6)
           MOVEQ     #'>',D4
-          BSR.S     DSPREGP
-          BRA       MAIN_1
+          BSR.S     DSPREGP         ; Print '>' at new register
+          BRA       MAIN_1          ; Done
 
 *--------------------------------------------------------------------
+* PRINT REGISTER POINTER
+*
+* Called to delete the current '>' register pointer and redraw it in
+* the new position when the pointer is moved. Where to print it is
+* determined by a table of X and Y positions in the window.
+* The '>' cursor is printed with a red strip to highlight it. If the
+* call is to print a space, the strip is reset to black.
 *--------------------------------------------------------------------
-*PRINT REGISTER POINTER
+DSPREGP   MOVE.L    REGWND(A6),A0   ; REGISTER window ID
+          MOVEQ     #-1,D3          ; Timeout
+          CMPI.B    #$20,D4         ; Space being printed?
+          BEQ.S     DSPRSP          ; Yes, delete current cursor
+          MOVEQ     #2,D1           ; Red strip for '>' prompt
+          MOVEQ     #SD_SETST,D0    ; 
+          TRAP      #3              ; Set strip to red
 
-DSPREGP   MOVE.L    REGWND(A6),A0
-          MOVEQ     #-1,D3
-          CMPI.B    #$20,D4
-          BEQ.S     DSPRSP
-          MOVEQ     #2,D1
-          MOVEQ     #SD_SETST,D0
-          TRAP      #3
-DSPRSP    MOVE.W    REGPTR(A6),D0
-          MOVEM.W   POSTABLE(PC,D0.W),D1-D2
+DSPRSP    MOVE.W    REGPTR(A6),D0   ; Current register pointer
+          MOVEM.W   POSTABLE(PC,D0.W),D1-D2 ; X,Y for current register
           MOVEQ     #SD_POS,D0
-          TRAP      #3
-          MOVE.B    D4,D1
+          TRAP      #3              ; Set position for this register
+          MOVE.B    D4,D1           ; Character to print
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          MOVEQ     #0,D1
+          TRAP      #3              ; Print cursor character
+          MOVEQ     #0,D1           ; Black
           MOVEQ     #SD_SETST,D0
-          TRAP      #3
+          TRAP      #3              ; Set black strip
           RTS
 
 *--------------------------------------------------------------------
@@ -1266,6 +1339,7 @@ DSPMEM    MOVE.L    MEMWND(A6),A0
           MOVEQ     #IO_SSTRG,D0
           TRAP      #3
           MOVEQ     #15,D7
+
 DM1_LP    ADDQ.W    #1,A4
           MOVEQ     #$20,D1
           MOVEQ     #IO_SBYTE,D0
@@ -1279,6 +1353,7 @@ DM1_LP    ADDQ.W    #1,A4
           CMP.L     TOP_PNT(A6),D1
           BHS.S     DM_CONV
           SUB.L     BASE_PNT(A6),D1
+
 DM_CONV   JSR       CN_HEXB
           MOVE.L    MEMWND(A6),A0
           CMPA.L    MEMPTR(A6),A4   ; Current memory address
@@ -1289,6 +1364,7 @@ DM_CONV   JSR       CN_HEXB
           MOVEQ     #7,D1
           MOVEQ     #SD_SETST,D0
           TRAP      #3
+
 DM_PRT    LEA       DISBUF(A6),A1
           MOVEQ     #2,D2
           MOVEQ     #IO_SSTRG,D0
@@ -1308,6 +1384,7 @@ DM_PRT    LEA       DISBUF(A6),A1
           SUBQ.W    #8,A4
           MOVEQ     #16,D7
 DM2_LP    MOVEQ     #$20,D1
+
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3
           LEA       DISBUF(A6),A0
@@ -2917,7 +2994,7 @@ COPY_REG  TRAP      #0              ; Supervisor mode
 * SV_JBPNT Current job's job table entry - depending on the caller,
 * however, we ALWAYS enter and exit here in supervisor mode.
 *--------------------------------------------------------------------
-EXAM_REGS MOVE.L    A0,JBPNT(A6)    ; Current job, or SuperBASIC
+EXAM_REGS MOVE.L    A0,JBPNT(A6)    ; Current job or SuperBASIC
           MOVE.L    (A0),A0         ; Base address of the job
           LEA       $20(A0),A0      ; Storage in job, for D0
           MOVE.L    A6,A1           ; A6 = Our dataspace = register storage
