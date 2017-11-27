@@ -1258,8 +1258,8 @@ RP_ADJ    MOVEQ     #$20,D4         ; Space as the pointer
           MOVE.W    REGPTR(A6),D0   ; Current register pointer
           MOVEQ     #80,D1          ; ???? -> TODO
           ADD.W     D5,D0           ; Offset to new register
-          BGE.S     RP_UPPER        ;       
-          ADD.W     D1,D0           ;
+          BGE.S     RP_UPPER        ; ???? -> TODO      
+          ADD.W     D1,D0           ; ???? -> TODO  
 
 RP_UPPER  CMP.W     D1,D0
           BLT.S     RP_STORE
@@ -1399,36 +1399,59 @@ DM2_LP    MOVEQ     #$20,D1
           RTS
 
 *--------------------------------------------------------------------
+* F3: Disassembly
+*
+* The disassembly buffer consists of 4 main parts:
+*   Bytes  0 - 26 = Address and Hex codes of instruction
+*   Bytes 27 - 33 = Labels
+*   Bytes 34 - 41 = Instruction
+*   Bytes 42 - 81 = Operand(s)
+*
+* 0     0            2      3      4                 8
+* 0     6            7      4      2                 1
+* 01068 50EE0036 ... L01068 ST     $0036(A6) ...     EOL
+*
+* At least when disassembling to a file. When output is to the screen
+* there are no labels, those spaces are blank. (Space filled.)
 *--------------------------------------------------------------------
 *DISASSEMBLY WINDOW HANDLER
 
-DSPDIS    MOVE.L    DISWND(A6),A0
+DSPDIS    MOVE.L    DISWND(A6),A0   ; DISASSEMBLY window ID
           MOVEQ     #-1,D3
           MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          MOVEQ     #1,D1
-          MOVEQ     #0,D2
+          TRAP      #3              ; CLS DISASSEMBLY window
+          MOVEQ     #1,D1           ; 8 Pixels wide
+          MOVEQ     #0,D2           ; 10 Pixels high
           MOVEQ     #SD_SETSZ,D0
-          TRAP      #3
+          TRAP      #3              ; Set character sizes
           MOVE.L    MEMPTR(A6),A4   ; Current memory address
-          ST        DISMOD(A6)
-          JSR       DISASSEM
-          MOVE.L    A0,D4
-          MOVE.L    DISWND(A6),A0
-          MOVEQ     #-1,D3
-          LEA       DISBUF(A6),A1
-          MOVEQ     #27,D2
+          ST        DISMOD(A6)      ; $FF = in disassembly
+          JSR       DISASSEM        ; Go do a disassembly
+          MOVE.L    A0,D4           ; Free byte in buffer? ???? -> TODO
+          MOVE.L    DISWND(A6),A0   ; DISASSEMBLY window ID  
+          MOVEQ     #-1,D3          ; Timeout
+          LEA       DISBUF(A6),A1   ; Disassembly to be printed
+          MOVEQ     #27,D2          ; This many bytes
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          LEA       MNFIELD(A6),A1
-          SUB.W     A1,D4
-          CMPI.W    #28,D4
-          BLE.S     DSPDIS_2
-          MOVEQ     #28,D4
-DSPDIS_2  MOVE.W    D4,D2
+          TRAP      #3              ; Print address & hex codes
+ 
+*--------------------------------------------------------------------
+* ???? -> TODO
+* Assuming A0 is returned as an address in the buffer, from DISASSEM,
+* then we appear to be restricting the instruction text to a maximum
+* of 28 bytes, so from byte 34 to byte 62 but the buffer allows up
+* to character 81, so why restrict the instruction part I wonder.
+*--------------------------------------------------------------------
+          LEA       MNFIELD(A6),A1  ; Start of instruction in buffer
+          SUB.W     A1,D4           ; Has instruction overflowed?
+          CMPI.W    #28,D4          ; Test for 28 bytes maximum
+          BLE.S     DSPDIS_2        ; We are ok, go print
+          MOVEQ     #28,D4          ; Adjust size of instruction
+
+DSPDIS_2  MOVE.W    D4,D2           ; How many bytes to print
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          RTS
+          TRAP      #3              ; Print disassembly line
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 * In the unlikely event of an exception hapening, the following are
@@ -1902,30 +1925,42 @@ AMEMPTR   ADD.L     D1,MEMPTR(A6)   ; Adjust the memory pointer
 
 *--------------------------------------------------------------------
 * Q: Quit the program.
+*
+* First make sure that all breakpoints are cleared.
 *--------------------------------------------------------------------
-QMON      MOVEQ     #BKPTABSIZ-1,D0
+QMON      MOVEQ     #BKPTABSIZ-1,D0 ; Prepare to clear breakpoint table
           LEA       BRKPTAB(A6),A0
-QMON_BRK  TST.L     (A0)
-          BEQ.S     BRKNXT
-          MOVE.L    (A0),A1
-          MOVE.W    4(A0),(A1)
-BRKNXT    ADDQ.W    #6,A0
-          DBF       D0,QMON_BRK
-          TRAP      #0
-          MOVE.W    $28062,D0
-          MOVE.L    $28068,A0
-          LEA       EXTAB-$54(A6),A2
-QMON_LP   TST.B     (A0)
-          BLT.S     QMON_NXT
-          MOVE.L    (A0),A1
-          CMPA.L    $1C(A1),A2
-          BNE.S     QMON_NXT
-          CLR.L     $1C(A1)
-QMON_NXT  ADDQ.W    #4,A0
-          DBF       D0,QMON_LP
-          CLR.L     $28050
-          ANDI      #$DFFF,SR
-          MOVEQ     #0,D0
+
+QMON_BRK  TST.L     (A0)            ; Breakpoint in this slot?
+          BEQ.S     BRKNXT          ; No, skip it
+          MOVE.L    (A0),A1         ; Yes, grab address
+          MOVE.W    4(A0),(A1)      ; Replace TRAP #15 with instruction
+
+BRKNXT    ADDQ.W    #6,A0           ; Point at next slot
+          DBF       D0,QMON_BRK     ; Do the whole table
+
+*--------------------------------------------------------------------
+* In supervisor mode, check every active job in the job table to see
+* if it is using our vector table. If so, clear out its vector table
+* then clear out the current vector table too.
+*--------------------------------------------------------------------
+          TRAP      #0              ; Supervisor mode
+          MOVE.W    $28062,D0       ; SV_JBMAX = Highest job to date
+          MOVE.L    $28068,A0       ; SV_JBBAS = Base of job table
+          LEA       EXTAB-$54(A6),A2    ; ???? -> TODO
+
+QMON_LP   TST.B     (A0)            ; $FF000000 = Inactive job
+          BLT.S     QMON_NXT        ; Skip those
+          MOVE.L    (A0),A1         ; Base of job
+          CMPA.L    $1C(A1),A2      ; JB_TRAPV = Vector table
+          BNE.S     QMON_NXT        ; It's not using our vector table
+          CLR.L     $1C(A1)         ; It was, clear it out
+
+QMON_NXT  ADDQ.W    #4,A0           ; Next job table entry
+          DBF       D0,QMON_LP      ; Do the whole table
+          CLR.L     $28050          ; Clear SV_TRAPV = current vector table
+          ANDI      #$DFFF,SR       ; User mode
+          MOVEQ     #0,D0           ; No errors
 
 
 *--------------------------------------------------------------------
