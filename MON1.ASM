@@ -190,7 +190,7 @@ SETTRAPS  PEA       EXBRKPNT        ; Code for this trap's vector
           PEA       EXILLINST       ; ILLEGAL instruction exception
           PEA       EXADDERR        ; Address error exception
 
-          MOVE.L    A7,A1           ; Exception vector table address
+          MOVE.L    A7,A1           ; EXTAB = Exception vectors address
           LEA       DATASPACE(A6),A7    ; Reset stack pointer
           MOVEQ     #-1,D1          ; For the current job
           MOVEQ     #MT_TRAPV,D0
@@ -2950,58 +2950,71 @@ OPC_MSG   DC.B      0,24,'Suppress opcode ? (Y/N) '
 DATA_MSG  DC.B      0,12,$0A,'Data areas',$0A
 
 *--------------------------------------------------------------------
-* E: Eaxmine a job.
+* E: Examine a job.
+*
+* Here we are prompted to enter a job id or a filename that will be
+* loaded as a new job (but not started) which we can monitor.
 *--------------------------------------------------------------------
-EXAMINE   JSR       RDSTRING
-          ADDQ.W    #2,A1
-          JSR       READHEX
-          BNE.S     EX2
-          CMPI.B    #10,(A1)
-          BEQ.S     GET_JB
+EXAMINE   JSR       RDSTRING        ; Read the jobid, or filename
+          ADDQ.W    #2,A1           ; Skip the word count
+          JSR       READHEX         ; Try to convert to a value in D1
+          BNE.S     EX2             ; Invalid characters - try a file
+          CMPI.B    #10,(A1)        ; Valid input?
+          BEQ.S     GET_JB          ; Yes, skip
 
-EX2       MOVEQ     #1,D4
-          BSR       OP_AGAIN
-          LEA       DISBUF(A6),A1
-          MOVEQ     #$40,D2
-          MOVEQ     #-1,D3
+*--------------------------------------------------------------------
+* The jobid was invalid, so we attempt a file open here.
+*--------------------------------------------------------------------
+EX2       MOVEQ     #1,D4           ; Open mode - old shared (OPEN_IN)
+          BSR       OP_AGAIN        ; Try to open it (doesn't return if error)
+          LEA       DISBUF(A6),A1   ; Working buffer
+          MOVEQ     #$40,D2         ; Size of buffer
+          MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #FS_HEADR,D0
-          TRAP      #3
-          TST.L     D0
-          BNE.S     EX_ERR
-          MOVEQ     #-15,D0
-          SUBQ.B    #1,DISBUF+5(A6)
-          BNE.S     EX_ERR
-          MOVE.L    A0,-(A7)
-          MOVE.L    DISBUF(A6),D2
-          MOVE.L    DISBUF+6(A6),D3
-          MOVEQ     #-1,D1
-          SUBA.L    A1,A1
+          TRAP      #3              ; Read file header
+          TST.L     D0              ; OK?
+          BNE.S     EX_ERR          ; No, bale out
+          MOVEQ     #-15,D0         ; Assume bad parameter error
+          SUBQ.B    #1,DISBUF+5(A6) ; File type, EXECutable = 1
+          BNE.S     EX_ERR          ; Not EXECutable, bale out
+          MOVE.L    A0,-(A7)        ; Save channel id for file
+          MOVE.L    DISBUF(A6),D2   ; File size from header
+          MOVE.L    DISBUF+6(A6),D3 ; Data space from header
+          MOVEQ     #-1,D1          ; This job is the owner job
+          SUBA.L    A1,A1           ; Start address = start of code        
           MOVEQ     #MT_CJOB,D0
-          TRAP      #1
-          MOVE.L    A0,A1
-          MOVE.L    (A7)+,A0
-          TST.L     D0
-          BNE.S     EX_ERR
-          MOVE.L    D1,D7
-          MOVEQ     #-1,D3
-          MOVEQ     #FS_LOAD,D0
-          TRAP      #3
-          TST.L     D0
-          BEQ.S     EX_ERR
-          MOVE.L    A0,-(A7)
-          MOVEQ     #0,D3
-          MOVE.L    D7,D1
+          TRAP      #1              ; Create a new job
+          MOVE.L    A0,A1           ; Job's address
+          MOVE.L    (A7)+,A0        ; Channel ID
+          TST.L     D0              ; Create ok?
+          BNE.S     EX_ERR          ; No, bale out
+          MOVE.L    D1,D7           ; Save job id
+          MOVEQ     #-1,D3          ; Timeout
+          MOVEQ     #FS_LOAD,D0     
+          TRAP      #3              ; Load job into job space reserved
+          TST.L     D0              ; Load ok?
+          BEQ.S     EX_ERR          ; No, bale out
+          MOVE.L    A0,-(A7)        ; Save A0
+          MOVEQ     #0,D3           ; Signal no error
+          MOVE.L    D7,D1           ; Job id
           MOVEQ     #MT_FRJOB,D0
-          TRAP      #1
-          MOVE.L    (A7)+,A0
+          TRAP      #1              ; Force kill the job
+          MOVE.L    (A7)+,A0        ; Restore A0
 
-EX_ERR    MOVE.L    D0,D4
-          MOVEQ     #IO_CLOSE,D0
-          TRAP      #2
-          MOVE.L    D4,D0
+*--------------------------------------------------------------------
+* The filename passed is invalid for a job, or cannot be read etc.
+*--------------------------------------------------------------------
+EX_ERR    MOVE.L    D0,D4           ; Save error code
+          MOVEQ     #IO_CLOSE,D0    
+          TRAP      #2              ; Close job file
+          MOVE.L    D4,D0           ; Retrieve error code
           BNE       PRT_ERR         ; Do error message then -> main loop
-          MOVE.L    D7,D1
+          MOVE.L    D7,D1           ; Copy the job id
 
+*--------------------------------------------------------------------
+* We are here with a jobid in D1. This is either an existing job or
+* one we just created from a supplied filename.
+*--------------------------------------------------------------------
 GET_JB    MOVE.L    $28068,A0
           LSL.W     #2,D1
           ADDA.W    D1,A0
