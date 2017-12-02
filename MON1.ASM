@@ -49,8 +49,8 @@ REGPTR    EQU       198             Current register pointer
 * The breakpoint table is defined here as 10 entries - if you change 
 * this, adjst what follows as well. Or else!
 *--------------------------------------------------------------------
-BKPTABSIZ EQU       10              Maximum entries in breakpoint table
 BRKPTAB   EQU       200             Breakpoint table - 10 entries of 6 bytes
+BKPTABSIZ EQU       10              Maximum entries in breakpoint table
 
 *--------------------------------------------------------------------
 * Adjest the following if you change the breakpoint table size. The
@@ -239,7 +239,7 @@ DO_OPEN   MOVE.W    UT_WINDW,A2     ; Open, paper, strip, ink, cls
 * out the entire breakpoint table - this is necessary as adding a new
 * breakpoint requires a slot value of zero.
 *--------------------------------------------------------------------
-          CLR.W     REGPTR(A6)      ; ???? -> TODO
+          CLR.W     REGPTR(A6)      ; No current register yet
           CLR.W     HEXSTR(A6)      ; ???? -> TODO
           LEA       BRKPTAB(A6),A0  ; Start of breakpoint table
           MOVEQ     #BKPTABSIZ-1,D0 ; Number of slots (minus 1)
@@ -1251,22 +1251,23 @@ RP_SUB8   MOVEQ     #-8*4,D5        ; Offset is -32 bytes
 *--------------------------------------------------------------------
 * Adjust the pointer position on screen to suit the ALT ARROW key 
 * just pressed to move the register pointer around the screen. Delete
-* it whereever it currently is and redraw it after moving.
+* it wherever it currently is and redraw it after moving. We do a bit
+* of arithmetic to keep D0 inside the register table/storage area.
 *--------------------------------------------------------------------
 RP_ADJ    MOVEQ     #$20,D4         ; Space as the pointer
           BSR.S     DSPREGP         ; Delete current '>'
           MOVE.W    REGPTR(A6),D0   ; Current register pointer
-          MOVEQ     #80,D1          ; ???? -> TODO
+          MOVEQ     #80,D1          ; D0-D7+A0-A7+PC = 20*4 bytes
           ADD.W     D5,D0           ; Offset to new register
-          BGE.S     RP_UPPER        ; ???? -> TODO      
-          ADD.W     D1,D0           ; ???? -> TODO  
+          BGE.S     RP_UPPER        ; A positive offset is good!     
+          ADD.W     D1,D0           ; Make positive again.  
 
-RP_UPPER  CMP.W     D1,D0
-          BLT.S     RP_STORE
-          SUB.W     D1,D0
+RP_UPPER  CMP.W     D1,D0           ; Too far?
+          BLT.S     RP_STORE        ; No, store new register pointer
+          SUB.W     D1,D0           ; Bring back into table
 
-RP_STORE  MOVE.W    D0,REGPTR(A6)
-          MOVEQ     #'>',D4
+RP_STORE  MOVE.W    D0,REGPTR(A6)   ; Store new current pointer
+          MOVEQ     #'>',D4         ; Prepare to highlight it
           BSR.S     DSPREGP         ; Print '>' at new register
           BRA       MAIN_1          ; Done
 
@@ -1308,14 +1309,14 @@ DSPRSP    MOVE.W    REGPTR(A6),D0   ; Current register pointer
 * then BP, TP, SR and back to D0 again. ALT UP is the reverse.
 *
 * Using ALT LEFT we go from D0 to A0 to PC to D4 to A4 to D0. ALT 
-* RIGHT is the revesre. Weird!
+* RIGHT is the reverse. Weird!
 *--------------------------------------------------------------------
 POSTABLE  DC.W      2,0,2,1,2,2,2,3,2,4,2,5,2,6,2,7
           DC.W      12,0,12,1,12,2,12,3,12,4,12,5,12,6,12,7,12,8,26,9,39,9,2,10
 
 *--------------------------------------------------------------------
+* MEMORY POINTER WINDOW HANDLER
 *--------------------------------------------------------------------
-*MEMORY POINTER WINDOW HANDLER
 
 DSPMEM    MOVE.L    MEMWND(A6),A0
           MOVEQ     #-1,D3
@@ -1399,7 +1400,7 @@ DM2_LP    MOVEQ     #$20,D1
           RTS
 
 *--------------------------------------------------------------------
-* F3: Disassembly
+* DISASSEMBLY WINDOW HANDLER
 *
 * The disassembly buffer consists of 4 main parts:
 *   Bytes  0 - 26 = Address and Hex codes of instruction
@@ -1414,8 +1415,6 @@ DM2_LP    MOVEQ     #$20,D1
 * At least when disassembling to a file. When output is to the screen
 * there are no labels, those spaces are blank. (Space filled.)
 *--------------------------------------------------------------------
-*DISASSEMBLY WINDOW HANDLER
-
 DSPDIS    MOVE.L    DISWND(A6),A0   ; DISASSEMBLY window ID
           MOVEQ     #-1,D3
           MOVEQ     #SD_CLEAR,D0
@@ -1454,11 +1453,10 @@ DSPDIS_2  MOVE.W    D4,D2           ; How many bytes to print
           RTS                       ; Done
 
 *--------------------------------------------------------------------
+* EXCEPTION MESSAGES
 * In the unlikely event of an exception hapening, the following are
 * the messages that will be displayed.
 *--------------------------------------------------------------------
-*EXCEPTION MESSAGES
-
 ADDERRMSG DC.W      14
           DC.B      10,'Address Error'
           DS.W      0
@@ -1517,6 +1515,11 @@ INTL7MSG  DC.W      18
 * $18023    PC_TRAK2    MDV Data (Track 2).     Display Control.
 *
 * For more information, you need the QDOS Technical Reference.
+*
+* Having said all that, the following code looks to be attempting to 
+* reinitialise (or something like that) the communications between
+* the 8049 and the rest of the system. It might work  I'm unable to
+* test it as I only have QPC.
 *--------------------------------------------------------------------
 EXINTL7   MOVE.L    A3,-(A7)        ; Save A3 for a bit
           LEA       $18020,A3       ; Microdrive/IPC control/status
@@ -1734,7 +1737,7 @@ MAIN_2    MOVE.L    CMDWND(A6),A0   ; Command window to be used
           MOVEQ     #1,D1           ; 8 pixels wide
           MOVEQ     #0,D2           ; 10 pixels high
           MOVEQ     #SD_SETSZ,D0
-          TRAP      #3              ; Set channle font size
+          TRAP      #3              ; Set channel font size
           MOVEQ     #'>',D1         ; Cursor character
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3              ; Print cursor
@@ -1751,9 +1754,12 @@ MAIN_2    MOVE.L    CMDWND(A6),A0   ; Command window to be used
                                     ; to upper case.
 
 *--------------------------------------------------------------------
-* Start searching the command table for the command in D1.B.
+* Start searching the command table for the command in D1.B. The table
+* entries are a word with the command byte in the lower byte, plus an
+* word offset to the actual code routine. The offset is from the 
+* address of the offset word itself. Zero ends the table.
 *--------------------------------------------------------------------
-SEARCHTAB LEA       CMDTAB,A2
+SEARCHTAB LEA       CMDTAB,A2       ; The command table
 
 
 *--------------------------------------------------------------------
@@ -1773,7 +1779,7 @@ NEXTCMD   MOVE.W    (A2)+,D0        ; Get the next command word
 *--------------------------------------------------------------------
 CMDFOUND  ADDA.W    (A2),A2         ; Add the offset to the command code
           TST.B     D1              ; Letter command or arrow etc command?
-          BLT.S     JMPCMD          ; Non-lette commands don't echo
+          BLT.S     JMPCMD          ; Non-letter commands don't echo
           MOVEQ     #IO_SBYTE,D0    ; Letter commands do echo to the
           TRAP      #3              ; COMMAND WINDOW
 JMPCMD    JMP       (A2)            ; Then do the action
@@ -1883,7 +1889,7 @@ CMDTAB    DC.W      $C0             ; Arrow LEFT Change Memory Pointer
           DC.W      ' X'            ; X Execute current instruction
           DC.W      XECUTE-*
 
-          DC.W      0
+          DC.W      0               ; End of table
 
 *--------------------------------------------------------------------
 * Arrow LEFT - decrement current memory pointer.
@@ -1943,11 +1949,18 @@ BRKNXT    ADDQ.W    #6,A0           ; Point at next slot
 * In supervisor mode, check every active job in the job table to see
 * if it is using our vector table. If so, clear out its vector table
 * then clear out the current vector table too.
+*
+* Wondering about the EXTAB-$54 operand? Me too - see Pennell page 94
+*
+* "When a table is set up, the (start address) - $54 is stored in
+* both SV.TRAPV and JB.TRAPV".
+*
+* It's a QDOS thing!
 *--------------------------------------------------------------------
           TRAP      #0              ; Supervisor mode
           MOVE.W    $28062,D0       ; SV_JBMAX = Highest job to date
           MOVE.L    $28068,A0       ; SV_JBBAS = Base of job table
-          LEA       EXTAB-$54(A6),A2    ; ???? -> TODO
+          LEA       EXTAB-$54(A6),A2    ; Vector table address
 
 QMON_LP   TST.B     (A0)            ; $FF000000 = Inactive job
           BLT.S     QMON_NXT        ; Skip those
@@ -2230,46 +2243,73 @@ BRKFULMSG DC.W      21
           DS.W      0
 
 *--------------------------------------------------------------------
+* F3: Disassemble to screen
+*
+* Disassemble a single page of output to the screen in the DISASSEMBLY
+* window. User is prompted to press ESC at the end of each page of
+* output. There is no prompting for data areas here, unlike when the 
+* 'D' command is used to disassemble to a file.
+* 
+* A4 is set up as the current memeory address (made even).
 *--------------------------------------------------------------------
 DIS_PAGE  MOVEQ     #SD_CURS,D0
-          TRAP      #3
-          BSR.S     ESC_MSG
-          MOVE.L    AUXWND(A6),A0
-          MOVEQ     #-1,D3
+          TRAP      #3              ; Enable the cursor (COMMAND Window)
+          BSR.S     ESC_MSG         ; PROMPT window - press ESC ....
+          MOVE.L    AUXWND(A6),A0   ; Use the AUX window for disassembly
+          MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          MOVE.L    MEMPTR(A6),D1
-          BCLR      #0,D1
-          MOVE.L    D1,A4
-          ST        DISMOD(A6)
-DP_LOOP   MOVE.W    #19,-(A7)
-DP_LOOP1  JSR       DISASSEM
-          MOVE.L    A0,D4
-          MOVE.L    AUXWND(A6),A0
+          TRAP      #3              ; Clear the AUX Window
+          MOVE.L    MEMPTR(A6),D1   ; Current memory address = start here
+          BCLR      #0,D1           ; Make even
+          MOVE.L    D1,A4           ; A4 = disassembly address
+          ST        DISMOD(A6)      ; We are disassembling ($FF)
+
+*--------------------------------------------------------------------
+* Head of the disassembly page loop. We allow 19 lines on the screen 
+* before we ask the user to press ESC or otherwise.
+*--------------------------------------------------------------------
+DP_LOOP   MOVE.W    #19,-(A7)       ; 19 lines of output allowed
+
+*--------------------------------------------------------------------
+* Disassembly loop. We disassemble a single line and save A0 which is
+* the first free byte in the output buffer. We need it later to count
+* characters.
+* We start by printing the hex address - but only the lowest 5 bytes -
+* then the hex codes for the instruction. These take up to 27 bytes.
+*--------------------------------------------------------------------
+DP_LOOP1  JSR       DISASSEM        ; Disassemble one line of code
+          MOVE.L    A0,D4           ; Pointer to end of buffer
+          MOVE.L    AUXWND(A6),A0   ; AUX window ID
           MOVEQ     #-1,D3
-          LEA       DISBUF(A6),A1
-          MOVEQ     #27,D2
+          LEA       DISBUF(A6),A1   ; Buffer pointer
+          MOVEQ     #27,D2          ; Address (5 bytes) and hex codes
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          LEA       MNFIELD(A6),A1
-          SUB.W     A1,D4
-          CMPI.W    #74-27,D4
-          BLE.S     DP_MNEM
-          MOVEQ     #74-27,D4
-DP_MNEM   MOVE.W    D4,D2
+          TRAP      #3              ; Print first part of the line
+          LEA       MNFIELD(A6),A1  ; Pointer to instructon disassembly
+          SUB.W     A1,D4           ; How many bytes to print?
+          CMPI.W    #74-27,D4       ; 47 bytes maximum
+          BLE.S     DP_MNEM         ; Size is ok, skip
+          MOVEQ     #74-27,D4       ; Limited to 47 bytes
+
+*--------------------------------------------------------------------
+* Print the actual decoded instruction now. This is limited to a max
+* of 47 characters. This could be longer as the buffer is 82 chars in
+* size giving 55 max - as far as I can see.
+*--------------------------------------------------------------------
+DP_MNEM   MOVE.W    D4,D2           ; How many bytes to print
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          MOVEQ     #10,D1
+          TRAP      #3              ; Print one line
+          MOVEQ     #10,D1          ; Linefeed
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          SUBQ.W    #1,(A7)
-          BNE.S     DP_LOOP1
-          ADDQ.W    #2,A7
-          MOVE.L    CMDWND(A6),A0
+          TRAP      #3              ; Print the linefeed
+          SUBQ.W    #1,(A7)         ; Decrement line counter
+          BNE.S     DP_LOOP1        ; Repeat if more to do
+          ADDQ.W    #2,A7           ; Tidy line counter off the stack
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
           MOVEQ     #IO_FBYTE,D0
-          TRAP      #3
-          CMPI.B    #$1B,D1
-          BNE.S     DP_LOOP
+          TRAP      #3              ; Wait for keypress
+          CMPI.B    #$1B,D1         ; ESC?
+          BNE.S     DP_LOOP         ; No, decode another page
 
 *--------------------------------------------------------------------
 * Clear the AUX and COMMAND WINDOWS before skipping back to the
@@ -2302,69 +2342,106 @@ ESCPROMPT DC.W      42
           DC.B      'Press any key to continue or <ESC> to exit'
 
 *--------------------------------------------------------------------
+* F2: List memory to screen
 *--------------------------------------------------------------------
 MEMDUMP   MOVEQ     #SD_CURS,D0
-          TRAP      #3
-          MOVE.L    PROMPTWND(A6),A0
+          TRAP      #3              ; Enable the cursor
+          MOVE.L    PROMPTWND(A6),A0    ; In the PROMPT window
           MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          MOVEQ     #0,D1
-          MOVEQ     #0,D2
+          TRAP      #3              ; Clear the PROMPT window
+          MOVEQ     #0,D1           ; 8 Pixels wide
+          MOVEQ     #0,D2           ; 10 Pixels high
           MOVEQ     #SD_SETSZ,D0
-          TRAP      #3
-          MOVEQ     #43,D1
-          MOVEQ     #0,D2
+          TRAP      #3              ; Set character size
+          MOVEQ     #43,D1          ; 43 Pixels across
+          MOVEQ     #0,D2           ; And zero down
           MOVEQ     #SD_PIXP,D0
-          TRAP      #3
-          LEA       MD_MSG1,A1
+          TRAP      #3              ; Set print position
+          LEA       MD_MSG1,A1      ; Heading
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          MOVE.W    #334,D1
-          MOVEQ     #0,D2
+          JSR       (A2)            ; Print the heading
+          MOVE.W    #334,D1         ; 334 Pixels across
+          MOVEQ     #0,D2           ; Zero down
           MOVEQ     #SD_PIXP,D0
-          TRAP      #3
-          LEA       MD_MSG2,A1
+          TRAP      #3              ; Set print position
+          LEA       MD_MSG2,A1      ; ASCII heading
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          MOVE.L    AUXWND(A6),A0
-          MOVEQ     #-1,D3
+          JSR       (A2)            ; Print ASCII heading
+          MOVE.L    AUXWND(A6),A0   ; AUX window ID
+          MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #SD_CLEAR,D0
-          TRAP      #3
-          MOVE.L    MEMPTR(A6),A4
+          TRAP      #3              ; Clear AUX window
+          MOVE.L    MEMPTR(A6),A4   ; Start address in A4
 
-MD_PAGE   MOVEQ     #18,D7
-MD_LOOP   MOVE.L    A4,D1
-          TST.B     RELMOD(A6)
-          BEQ.S     MD2
-          CMP.L     BASE_PNT(A6),D1
-          BLO.S     MD2
-          CMP.L     TOP_PNT(A6),D1
-          BHS.S     MD2
-          SUB.L     BASE_PNT(A6),D1
-          ANDI.B    #$F0,D1
-          ADD.L     BASE_PNT(A6),D1
-          BRA.S     MD3
+*--------------------------------------------------------------------
+* Head of the page loop. We set up to allow 19 lines of memory to be
+* dumped to the screen. There is no prompt at the end of each page to
+* press ESC - it is assumed we know.
+*--------------------------------------------------------------------
+MD_PAGE   MOVEQ     #18,D7          ; 19 Lines per page
 
-MD2       ANDI.B    #$F0,D1
+*--------------------------------------------------------------------
+* The start address, the current memory pointer, is in A4 but we now
+* test and adjust for relative mode.
+*--------------------------------------------------------------------
+MD_LOOP   MOVE.L    A4,D1           ; Save start address
+          TST.B     RELMOD(A6)      ; Relative mode ($FF = Yes)
+          BEQ.S     MD2             ; No, skip
 
-MD3       MOVE.L    D1,A4
-          BSR.S     DO_MEM
-          MOVE.L    AUXWND(A6),A0
-          MOVEQ     #-1,D3
-          LEA       DISBUF(A6),A1
-          MOVEQ     #72,D2
+*--------------------------------------------------------------------
+* If we are in relative mode, check the start address is within the
+* monitored job's code boundary.
+*--------------------------------------------------------------------
+          CMP.L     BASE_PNT(A6),D1 ; Are we above base address?
+          BLO.S     MD2             ; No, skip
+          CMP.L     TOP_PNT(A6),D1  ; Are we below top address?
+          BHS.S     MD2             ; No, skip
+
+*--------------------------------------------------------------------
+* Our start address is withing the job's code area. Make sure we set
+* it to a multiple of 16 bytes before we dump - the one before the
+* starting address.
+*--------------------------------------------------------------------
+          SUB.L     BASE_PNT(A6),D1 ; Remove base address
+          ANDI.B    #$F0,D1         ; Round down to previous 16 byte
+          ADD.L     BASE_PNT(A6),D1 ; Absolute address again
+          BRA.S     MD3             ; Skip
+
+*--------------------------------------------------------------------
+* Make the address an even multiple of 16 bytes, and force it to start
+* from the 16 byte boundary just below the desired start address.
+* So $12345 (74,565) becomes $12340 (74,560).
+*--------------------------------------------------------------------
+MD2       ANDI.B    #$F0,D1         ; Round down to nearest 16
+
+*--------------------------------------------------------------------
+* At this point we have an address that has been rounded down to the
+* nearest 16 byte boundary. This is desired as we only ever dump in
+* 16 byte chunks - there are no partial lines here.
+*--------------------------------------------------------------------
+MD3       MOVE.L    D1,A4           ; Adjusted start address
+          BSR.S     DO_MEM          ; Dump one line of 16 bytes
+          MOVE.L    AUXWND(A6),A0   ; AUX window ID
+          MOVEQ     #-1,D3          ; Timeout
+          LEA       DISBUF(A6),A1   ; Where the data are
+          MOVEQ     #72,D2          ; How many bytes per line
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          MOVEQ     #10,D1
+          TRAP      #3              ; Print one line
+          MOVEQ     #10,D1          ; Linefeed
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          DBF       D7,MD_LOOP
-          MOVE.L    CMDWND(A6),A0
+          TRAP      #3              ; Print the linefeed
+          DBF       D7,MD_LOOP      ; Do the remaining lines
+
+*--------------------------------------------------------------------
+* At the end of each page of 19 lines, wait for a key to be pressed
+* in the COMMAND window.
+*--------------------------------------------------------------------
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
           MOVEQ     #IO_FBYTE,D0
-          TRAP      #3
-          CMPI.B    #$1B,D1
-          BNE.S     MD_PAGE
-          BRA       DP_END
+          TRAP      #3              ; Wait for a keypress
+          CMPI.B    #$1B,D1         ; ESC?
+          BNE.S     MD_PAGE         ; No, do another page
+          BRA       DP_END          ; Yes, clear AUX & COMMAND windows
 
 *--------------------------------------------------------------------
 * Output a single line of 16 bytes, in hex and as characters from the
@@ -2396,12 +2473,16 @@ DM_CH1    MOVE.B    D1,(A0)+        ; Buffer a character
           RTS                       ; Done
 
 *--------------------------------------------------------------------
+* Heading for memory dump to screen. (But not to file!) The digits in
+* the following are pixel positioned to appear midway between the two
+* hex digits being output on the screen.
 *--------------------------------------------------------------------
 MD_MSG1   DC.W      MDMSG_END-*-2
           DC.B      '0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F'
 MDMSG_END EQU       *
 
 *--------------------------------------------------------------------
+* Heading for the ASCII character end of the memory dump output.
 *--------------------------------------------------------------------
 MD_MSG2   DC.W      16
           DC.B      '0123456789ABCDEF'
@@ -2510,9 +2591,9 @@ BADHEXMSG DC.B      0,7,'Bad Hex'
 *--------------------------------------------------------------------
 * S: Search for a hexadecimal string.
 *--------------------------------------------------------------------
-FIND_HEX  MOVEQ     #':',D1
+FIND_HEX  MOVEQ     #':',D1         ; Prompt for COMMAND window
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
+          TRAP      #3              ; Print prompt
           LEA       HEXSTR+2(A6),A4
           BSR.S     HEX_LINE
           LEA       HEXSTR(A6),A5
@@ -2521,71 +2602,104 @@ FIND_HEX  MOVEQ     #':',D1
           BLT.S     FH_DEFLT
           MOVE.W    D7,(A5)+
           BRA.S     FH_MEM
+
 FH_DEFLT  MOVE.W    (A5)+,D7
+
 FH_MEM    MOVE.L    MEMPTR(A6),A3
+
 FH_LOOP   ADDQ.W    #1,A3
           MOVE.W    D7,D6
           MOVE.L    A5,A4
           MOVE.L    A3,A2
+
 FH_CMP    CMPM.B    (A2)+,(A4)+
           DBNE      D6,FH_CMP
           TST.W     D6
           BGE.S     FH_LOOP
+
 FH_END    MOVE.L    A3,MEMPTR(A6)
           BSR       DSPMEM
           BSR       DSPDIS
           BRA       MAIN_2
 
 *--------------------------------------------------------------------
-* H: Convert decimal to Hexadecimal.
+* H: Convert binary/decimal/hexadecimal to Hexadecimal.
 *--------------------------------------------------------------------
-DECTOHEX  BSR       GETADDR1
-          LEA       DISBUF(A6),A0
-          MOVE.L    #'  = ',(A0)+
-          JSR       CN_HEXL
-          MOVE.L    CMDWND(A6),A0
-          LEA       DISBUF+1(A6),A1
-          MOVEQ     #11,D2
-DTOH_2    MOVEQ     #-1,D3
+DECTOHEX  BSR       GETADDR1        ; Get a value, dec, bin or hex
+          LEA       DISBUF(A6),A0   ; Output buffer start
+          MOVE.L    #'  = ',(A0)+   ; Prompt
+          JSR       CN_HEXL         ; Convert to hex long 
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          LEA       DISBUF+1(A6),A1 ; Data start
+          MOVEQ     #11,D2          ; How many bytes to print
+
+*--------------------------------------------------------------------
+* Enter here with A1 pointing at the buffer start and D2 holding
+* the number of bytes to print, and A0 with the channel id.
+*--------------------------------------------------------------------
+DTOH_2    MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          BRA       MAIN_1
+          TRAP      #3              ; Print the details
+          BRA       MAIN_1          ; Back into main loop
 
 *--------------------------------------------------------------------
-* G: Convert Hexadecimal to Decimal.
+* G: Convert binary/decimal/hexadecimal to Decimal.
 *--------------------------------------------------------------------
-HEXTODEC  BSR       GETADDR1
-          LEA       DISBUF+14(A6),A1
-          MOVEQ     #3,D2
-          MOVE.L    D1,D4
-          BGE.S     HD_LOOP
-          NEG.L     D1
-HD_LOOP   MOVEQ     #0,D0
-          SWAP      D1
-          MOVE.W    D1,D0
-          DIVU      #10,D0
-          SWAP      D0
-          MOVE.W    D0,D1
-          SWAP      D1
-          DIVU      #10,D1
-          MOVE.W    D1,D0
-          SWAP      D1
-          EXG       D0,D1
-          ADDI.B    #'0',D0
-          MOVE.B    D0,-(A1)
-          ADDQ.W    #1,D2
-          TST.L     D1
-          BNE.S     HD_LOOP
-          TST.L     D4
-          BGE.S     HD_POS
-          MOVE.B    #'-',-(A1)
-          ADDQ.W    #1,D2
+HEXTODEC  BSR       GETADDR1        ; Get a value, dec, bin or hex
+          LEA       DISBUF+14(A6),A1    ; Output buffer end
+          MOVEQ     #3,D2           ; 3 characters to print so far
+          MOVE.L    D1,D4           ; Positive?
+          BGE.S     HD_LOOP         ; Yes, skip
+          NEG.L     D1              ; No, make it positive
+
+*--------------------------------------------------------------------
+* The value in D1.L is now positive. D4 has the original value.
+* We convert D1.L to decimal by dint of repeated division by 10.
+* I haven't quite worked out the algorithm here, but it works!
+*--------------------------------------------------------------------
+HD_LOOP   MOVEQ     #0,D0           ; Current digit accumulator   
+          SWAP      D1              ; Start with the high word
+          MOVE.W    D1,D0           ; Accumulate it  
+          DIVU      #10,D0          ; Guess!
+          SWAP      D0              ; Swap remainder into low word
+          MOVE.W    D0,D1           ; Move remainder into D1.W
+          SWAP      D1              ; And into the high word of D1
+          DIVU      #10,D1          ; Divide the low word now
+          MOVE.W    D1,D0           ; Quotient into D0.W
+          SWAP      D1              ; Remainder in low word
+          EXG       D0,D1           ; Swap around.
+          ADDI.B    #'0',D0         ; ASCIIfy this digit
+          MOVE.B    D0,-(A1)        ; Buffer it
+          ADDQ.W    #1,D2           ; One more byte to print
+          TST.L     D1              ; Done yet?
+          BNE.S     HD_LOOP         ; No, do more
+
+*--------------------------------------------------------------------
+* We are done dividing and ASCIIfying. 
+*--------------------------------------------------------------------
+          TST.L     D4              ; Do we need a minus?
+          BGE.S     HD_POS          ; No, skip
+          MOVE.B    #'-',-(A1)      ; Yes, buffer one
+          ADDQ.W    #1,D2           ; Increment byte counter
+
+*--------------------------------------------------------------------
+* Buffer up the three extra characters we pre-loaded D2 with, above.
+* I think there must be a space already there when we are done, as we
+* only add two characters here, not three.
+* The output buffer is now ' = nnnnnn' - at least, that's what prints.
+*--------------------------------------------------------------------
 HD_POS    MOVEQ     #' ',D0
-          MOVE.B    D0,-(A1)
+          MOVE.B    D0,-(A1)        ; Buffer a space 
           MOVE.B    #'=',-(A1)
-          MOVE.B    D0,-(A1)
-          BRA.S     DTOH_2
+          MOVE.B    D0,-(A1)        ; Buffer an equals
+          BRA.S     DTOH_2          ; Print the output
 
+*--------------------------------------------------------------------
+* O: Change relative mode.
+*
+* If we are in relative mode, change $FF to $00 and if not, change
+* $00 to $FF.
+*--------------------------------------------------------------------
 CH_OFFSET NOT.B     RELMOD(A6)
           BRA       MAIN_REG
 
@@ -3015,24 +3129,30 @@ EX_ERR    MOVE.L    D0,D4           ; Save error code
 * We are here with a jobid in D1. This is either an existing job or
 * one we just created from a supplied filename.
 *--------------------------------------------------------------------
-GET_JB    MOVE.L    $28068,A0
-          LSL.W     #2,D1
-          ADDA.W    D1,A0
-          CMPA.L    $2806C,A0
-          BGE.S     BAD_JOB
-          TST.B     (A0)
-          BGE.S     COPY_REG
+GET_JB    MOVE.L    $28068,A0       ; SV_JBBAS = Start of job table
+          LSL.W     #2,D1           ; 4 bytes per job
+          ADDA.W    D1,A0           ; Point into job table
+          CMPA.L    $2806C,A0       ; SV_JBTOP = still in table?
+          BGE.S     BAD_JOB         ; No, error exit
+          TST.B     (A0)            ; Yes, active job?
+          BGE.S     COPY_REG        ; Yes, copy registers etc to our storage
 
-BAD_JOB   MOVEQ     #-2,D0
+*--------------------------------------------------------------------
+* We have a bad job id. Display an error and bale out,
+*--------------------------------------------------------------------
+BAD_JOB   MOVEQ     #-2,D0          ; Invalid Job id error code
           BRA       PRT_ERR         ; Do error message then -> main loop
 
+*--------------------------------------------------------------------
+* We only arrive here if the job id we had in D1 was valid.
+*--------------------------------------------------------------------
 COPY_REG  TRAP      #0              ; Supervisor mode
           BSR.S     EXAM_REGS       ; Copy registers etc to storage
-          ANDI      #$DFFF,SR
-          BSR       DSPREG
-          BSR       DSPMEM
-          BSR       DSPDIS
-          BRA       MAIN_2
+          ANDI      #$DFFF,SR       ; User mode again
+          BSR       DSPREG          ; Display registers
+          BSR       DSPMEM          ; Display 16 bytes around mem pointer
+          BSR       DSPDIS          ; Display one line of disassembly
+          BRA       MAIN_2          ; Go around again
 
 *--------------------------------------------------------------------
 * Copy the monitored job's registers to our storage for later display
@@ -3068,9 +3188,15 @@ COPY_R_LP MOVE.L    (A0)+,(A1)+     ; Copy a job's register to our storage
 *--------------------------------------------------------------------
 * Force the job to use our exception vector table too, otherwise we
 * won't be able to trap exceptions, trace progress etc.
+* Wondering about the EXTAB-$54 operand? Me too - see Pennell page 94
+*
+* "When a table is set up, the (start address) - $54 is stored in
+* both SV.TRAPV and JB.TRAPV".
+*
+* It's a QDOS thing!
 *--------------------------------------------------------------------
           LEA       -$68(A0),A0     ; Start of job again
-          LEA       EXTAB-$54(A6),A2    ; ???? -> TODO
+          LEA       EXTAB-$54(A6),A2    ; Vector table address
           MOVE.L    A2,$1C(A0)      ; JB_TRAPV - vector table
           CMPA.L    $28010,A0       ; SV_BASIC = Start of SuperBASIC area
           BEQ.S     ST_TP_1         ; Skip if SuperBASIC is the job
@@ -3140,38 +3266,66 @@ GTSIZ_END
 SIZMSG    DC.B      0,15,'Size ? (B,W,L) ',0
 
 *--------------------------------------------------------------------
+* F: Fill memory
+*
+* Propt for first address, last address, size and what to fill into
+* the range of addresses.
 *--------------------------------------------------------------------
-FILL      MOVEQ     #10,D1
+FILL      MOVEQ     #10,D1          ; Newline
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          BSR       FIRSTLAST
-          OR.L      D4,D1
-          BEQ       MAIN_1
-          MOVE.L    D4,A4
-          BSR.S     GET_SIZE
-          MOVE.B    D1,D7
-          LEA       WITHMSG,A1
+          TRAP      #3              ; Print newline (COMMAND window)
+          BSR       FIRSTLAST       ; Get first and last addresses
+          OR.L      D4,D1           ; Got start address?
+          BEQ       MAIN_1          ; No, loop around again
+          MOVE.L    D4,A4           ; Start address
+          BSR.S     GET_SIZE        ; Get size to fill
+          MOVE.B    D1,D7           ; Save size          
+          LEA       WITHMSG,A1      ; 'With' prompt
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          BSR       GETADDR1
-          TST.B     D7
-          BEQ.S     FILL_W
-          BGT.S     FILL_L
-FILL_B    MOVE.B    D1,(A4)+
-          CMPA.L    D5,A4
-          BLE.S     FILL_B
-          BRA.S     FILL_END
-FILL_W    MOVE.W    D1,(A4)+
-          CMPA.L    D5,A4
-          BLE.S     FILL_W
-          BRA.S     FILL_END
-FILL_L    MOVE.L    D1,(A4)+
-          CMPA.L    D5,A4
-          BLE.S     FILL_L
+          JSR       (A2)            ; Print it
+          BSR       GETADDR1        ; Get the value
+          TST.B     D7              ; What size?
+          BEQ.S     FILL_W          ; Zero = word
+          BGT.S     FILL_L          ; +1 = long
+
+*--------------------------------------------------------------------
+* Fill memory with byte values. A4 is the destination, D1 is the
+* value.
+*--------------------------------------------------------------------
+FILL_B    MOVE.B    D1,(A4)+        ; Fill one byte
+          CMPA.L    D5,A4           ; Done yet?
+          BLE.S     FILL_B          ; No, do more
+          BRA.S     FILL_END        ; Yes, bale out
+
+*--------------------------------------------------------------------
+* Fill memory with word values. A4 is the destination, D1 is the
+* value.
+*--------------------------------------------------------------------
+FILL_W    MOVE.W    D1,(A4)+        ; Fill one word
+          CMPA.L    D5,A4           ; Done yet?
+          BLE.S     FILL_W          ; No, do more
+          BRA.S     FILL_END        ; Yes, bale out
+
+*--------------------------------------------------------------------
+* Fill memory with long values. A4 is the destination, D1 is the
+* value.
+*--------------------------------------------------------------------
+FILL_L    MOVE.L    D1,(A4)+        ; Fill one long word
+          CMPA.L    D5,A4           ; Done yet?
+          BLE.S     FILL_L          ; No, do more
+
+*--------------------------------------------------------------------
+* Filling is complete. Exit back to the main loop.
+*--------------------------------------------------------------------
 FILL_END  BRA       MAIN_2
+
+*--------------------------------------------------------------------
+* Message to prompt user for a value to fill memeory with.
+*--------------------------------------------------------------------
 WITHMSG   DC.B      0,4,'With'
 
 *--------------------------------------------------------------------
+* K: Copy block of memory
 *--------------------------------------------------------------------
 COPY      MOVEQ     #10,D1
           MOVEQ     #IO_SBYTE,D0
