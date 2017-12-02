@@ -39,7 +39,7 @@ AUXWND    EQU       178             Auxiliary Window ID
 * We save our own job id and whatever is the current job's entry in 
 * the job table.
 *--------------------------------------------------------------------
-OWN_JB    EQU       182             ???? -> TODO
+OWN_JB    EQU       182             Pointer to our own entry in job table
 JBPNT     EQU       186             Pointer to current job's job table entry
 MEMPTR    EQU       190             Current memory address
 MATHSTK   EQU       194             Temp 4 byte maths stack (198 - 194)
@@ -58,11 +58,11 @@ BKPTABSIZ EQU       10              Maximum entries in breakpoint table
 * The default size is 10 slots of 6 bytes or 60 bytes.
 *--------------------------------------------------------------------
 RELMOD    EQU       BRKPTAB+60      Relative mode flag
-DISMOD    EQU       BRKPTAB+61      Disassembly mode flag
+DISMOD    EQU       BRKPTAB+61      Disassembly mode: <0 single, 0 or 1 multi-pass
 OPCODEFLG EQU       BRKPTAB+62      Flag - $FF = Suppress Opcodes in disassembly
 WRKSPOV   EQU       BRKPTAB+63      We overflowed the workspace flag ($FF = Overflow)
 DATATBL   EQU       BRKPTAB+64      Dataspace allocated for disassembly address etc
-LBL_TBL   EQU       BRKPTAB+68      ???? -> TODO
+LBL_TBL   EQU       BRKPTAB+68      Pointer to start of label table
 WRKSPTR   EQU       BRKPTAB+72      First free space in workarea (DATATBL)
 WRK_END   EQU       BRKPTAB+76      End of the above buffer - 16
 DISFRST   EQU       BRKPTAB+80      First address to disassemble
@@ -79,8 +79,8 @@ DISBUF    EQU       BRKPTAB+88      Disassembly buffer
 * other stuff, as and when required.
 *--------------------------------------------------------------------
 LBL_FLD   EQU       DISBUF+27       The labels go here - up to 9 bytes
-MNFIELD   EQU       DISBUF+34       ???? -> TODO
-OPR_FLD   EQU       DISBUF+42       ???? -> TODO
+MNFIELD   EQU       DISBUF+34       Start of mnemonic field
+OPR_FLD   EQU       DISBUF+42       Start of operand field
 DISBUFLEN EQU       82              Size of disassembly buffer (bytes)
 HEXSTR    EQU       DISBUF+DISBUFLEN    Where the HEX codes go in the buffer
 
@@ -2997,8 +2997,8 @@ WRKERRMSG DC.B      0,18,'Workspace Overflow'
 * D: Disassemble to screen. Enter here from disassemble to file with
 * A5 holding the ouput file ID too.
 *--------------------------------------------------------------------
-DIS_START MOVE.L    WRKSPTR(A6),LBL_TBL(A6) ; Save ???? -> TODO
-          SF        DISMOD(A6)      ; Flag - $00 set in DISMOD.
+DIS_START MOVE.L    WRKSPTR(A6),LBL_TBL(A6) ; Set start of label table
+          SF        DISMOD(A6)      ; Flag 'pass 1 of 2'
           MOVE.L    DISFRST(A6),A4  ; Address to be disassembled
 
 DIS1_LP   MOVE.L    A5,-(A7)        ; Save output channel ID
@@ -3008,12 +3008,12 @@ DIS1_LP   MOVE.L    A5,-(A7)        ; Save output channel ID
           BNE.S     WRKSP_ERR       ; Sadly, yes
           CMPA.L    DISLAST(A6),A4  ; No - have we finished?
           BLS.S     DIS1_LP         ; No, do some more
-          ADDQ.B    #1,DISMOD(A6)   ; Flag - $00 set in DISMOD
+          ADDQ.B    #1,DISMOD(A6)   ; Flag 'pass 2 of 2'
           MOVE.L    DISFRST(A6),A4  ; Get the start address again
           MOVE.L    A5,-(A7)        ; Save the worker again        
 
 DIS2_LP   JSR       DISASSEM        ; Disassemble address (A4)
-          MOVE.L    A0,D2           ; ???? -> TODO
+          MOVE.L    A0,D2           ; End of line in buffer
           LEA       DISBUF(A6),A1   ; Disassembly buffer start
           TST.B     OPCODEFLG(A6)   ; Are we suppressing opcodes?
           BEQ.S     DIS_OUT         ; No we are not
