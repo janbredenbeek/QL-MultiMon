@@ -3326,38 +3326,66 @@ WITHMSG   DC.B      0,4,'With'
 
 *--------------------------------------------------------------------
 * K: Copy block of memory
+*
+* User is prompted for First, Last, To addresses.
+* D4 = First, D1 = To, D5 = Last.
 *--------------------------------------------------------------------
-COPY      MOVEQ     #10,D1
+COPY      MOVEQ     #10,D1          ; Linefeed
           MOVEQ     #IO_SBYTE,D0
-          TRAP      #3
-          BSR       FIRSTLAST
-          LEA       TO_MSG,A1
+          TRAP      #3              ; Print linefeed
+          BSR       FIRSTLAST       ; First and last addresses in D4,D5
+          LEA       TO_MSG,A1       ' 'To' message
           MOVE.W    UT_MTEXT,A2
-          JSR       (A2)
-          BSR       GETADDR1
-          MOVE.L    D1,A5
-          CMP.L     D4,D1
-          BLE.S     COPY_UP
-          CMP.L     D5,D1
-          BLE.S     COPY_DOWN
-COPY_UP   MOVE.L    D4,A4
-COPY_U_LP MOVE.B    (A4)+,(A5)+
-          CMPA.L    D5,A4
-          BLE.S     COPY_U_LP
-          BRA.S     COPY_END
-COPY_DOWN MOVE.L    D5,A4
-          ADDQ.W    #1,A4
-          SUB.L     D4,D5
-          LEA       1(A5,D5.L),A5
-COPY_D_LP MOVE.B    -(A4),-(A5)
-          CMPA.L    D4,A4
-          BGT.S     COPY_D_LP
-COPY_END  BRA       MAIN_2
+          JSR       (A2)            ; Print it
+          BSR       GETADDR1        ; Get the To address
+          MOVE.L    D1,A5           ; Destination in A5           
+          CMP.L     D4,D1           ; First and To
+          BLE.S     COPY_UP         ; First <= To, copy upwards
+          CMP.L     D5,D1           ; Last and To
+          BLE.S     COPY_DOWN       ; Last <= To, copy downwards
+
+*--------------------------------------------------------------------
+* If the From & Last addresses are <= To address we can copy up in 
+* memory.
+*
+* First ....... Last ....... To
+*--------------------------------------------------------------------
+COPY_UP   MOVE.L    D4,A4           ; From address
+
+COPY_U_LP MOVE.B    (A4)+,(A5)+     ; Copy a byte
+          CMPA.L    D5,A4           ; Reached Last address?
+          BLE.S     COPY_U_LP       ; No, copy another byte
+          BRA.S     COPY_END        ; Yes, done
+
+*--------------------------------------------------------------------
+* If there's an overlap in First, Last and To addresses then we copy 
+* downwards.
+*
+* First ....... To ....... Last (etc)
+*--------------------------------------------------------------------
+COPY_DOWN MOVE.L    D5,A4           ; Last address
+          ADDQ.W    #1,A4           ; One past last
+          SUB.L     D4,D5           ; How many bytes to copy
+          LEA       1(A5,D5.L),A5   ; Set To address top + 1
+
+COPY_D_LP MOVE.B    -(A4),-(A5)     ; Copy a single byte downwards
+          CMPA.L    D4,A4           ; Reached the start yet?
+          BGT.S     COPY_D_LP       ; No, do another
+
+COPY_END  BRA       MAIN_2          ; All done, back to main loop
+
+
+*--------------------------------------------------------------------
+* Message used to prompt the user for the 'to' address when copying a
+* block of memeory with the K command (above).
+*--------------------------------------------------------------------
 TO_MSG    DC.B      0,2,'To'
 
 *--------------------------------------------------------------------
-* V - Version command. Fills the output window with details of all
-* the running jobs in the system.
+* V - Version command.
+*
+* Fills the output window with details of all the running jobs in the 
+* system.
 *--------------------------------------------------------------------
 VERSION   LEA       JOBSMSG,A1
           MOVE.W    UT_MTEXT,A2
