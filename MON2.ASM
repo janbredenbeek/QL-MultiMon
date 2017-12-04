@@ -133,6 +133,7 @@ CN_STORE  ADDI.B    #'0',D2         ; ASCIIfy the digit/letter
           RTS                       ; Done
 
 *--------------------------------------------------------------------
+
 *--------------------------------------------------------------------
 DEST_EA   MOVEQ     #7,D0
           MOVE.W    D7,D5
@@ -154,25 +155,43 @@ EA_ERROR  MOVE.B    #'?',(A0)+
           RTS
 
 *--------------------------------------------------------------------
+* Get addressing mode from opcode in D7
+* Returns: Register number in D5, addressing mode in D6
+* Value of D6       Mode
+* -----------       ----
+*         0         Dn
+*         1         An
+*         2         (An)
+*         3         (An)+
+*         4         -(An)
+*         5         n(An)
+*         6         n(An,A/Dn)
+*         7         addr.W
+*         8         addr.L
+*         9         addr(PC)
+*        10         addr(PC,A/Dn)
+*        11         #nn
 *--------------------------------------------------------------------
-GET_MR    MOVEQ     #$07,D5
-          MOVEQ     #$38,D6
-          AND.B     D7,D5
+GET_MR    MOVEQ     #$07,D5          ; Bits 0-2 hold register number
+          MOVEQ     #$38,D6          ; Bits 3-5 are mode bits
+          AND.B     D7,D5            ; Mask off bits in D5 and D6
           AND.B     D7,D6
-          LSR.B     #3,D6
-          CMPI.B    #$07,D6
-          BNE.S     L702DE
-          ADD.B     D5,D6
-L702DE    RTS
+          LSR.B     #3,D6            ; Shift mode bits to 0-2
+          CMPI.B    #$07,D6          ; If bits are 111, the register
+          BNE.S     L702DE           ; bits indicate modes 7 to 11
+          ADD.B     D5,D6            ; so add these to D6
+L702DE    RTS                        ; Done
 
 *--------------------------------------------------------------------
+* A DATA-type Effective Address is required here
 *--------------------------------------------------------------------
 EA_DATA   BSR.S     GET_MR
           CMPI.B    #$01,D6
-          BEQ.S     EA_ERROR
+          BEQ.S     EA_ERROR         ; give error with An-type
           BRA.S     EA_DEC_1
 
 *--------------------------------------------------------------------
+* A Memory Alterable Effective Address is required here
 *--------------------------------------------------------------------
 EA_MALT   BSR.S     GET_MR
           CMPI.B    #$08,D6
@@ -194,6 +213,7 @@ EA_CTRL   BSR.S     GET_MR
           BRA.S     EA_DEC_1
 
 *--------------------------------------------------------------------
+* A Data Alterable Effective Address is required here
 *--------------------------------------------------------------------
 EA_DALT   BSR.S     GET_MR
           CMPI.B    #1,D6
@@ -204,13 +224,14 @@ EA_ALT    BSR.S     GET_MR
           BRA.S     EA_DEC_1
 
 *--------------------------------------------------------------------
+* Decode the Effective Address of an instruction (opcode in D7)
 *--------------------------------------------------------------------
-EA_DECODE BSR.S     GET_MR
-EA_DEC_1  CMPI.B    #11,D6
-          BHI.S     EA_ERROR
-          LSL.W     #1,D6
-          MOVE.W    EA_TABLE(PC,D6.W),A1
-          JMP       EA_TABLE(PC,A1.W)
+EA_DECODE BSR.S     GET_MR            ; Get mode in D5 and D6
+EA_DEC_1  CMPI.B    #11,D6            ; Any mode > 11 is an error
+          BHI.S     EA_ERROR          ; (at least on 68000/8)
+          LSL.W     #1,D6             ; Double the mode value
+          MOVE.W    EA_TABLE(PC,D6.W),A1 ; and index into the table
+          JMP       EA_TABLE(PC,A1.W) ; Jump to appropriate handler
 
 *--------------------------------------------------------------------
 * Table of pointers to Effective Address decoding routines based on
@@ -324,66 +345,76 @@ EA_6      JSR       ADV_W           ; Get the displacement word
           BRA.S     EA_INDEX        ; The index register
 
 *--------------------------------------------------------------------
+* EA Mode 7 - Absolute Word                                      nn.W
 *--------------------------------------------------------------------
 EA_7      JSR       ADV_W           ; Get the displacement word
           EXT.L     D1              ; Make it long, sign extended
           BRA.S     EA_ADDR         ; Skip
 
 *--------------------------------------------------------------------
+* EA Mode 8 - Absolute Long                                    nnnn.L
 *--------------------------------------------------------------------
 EA_8      JSR       ADV_L           ; Get the displacement long word
           BRA.S     EA_ADDR         ; Skip
 
 *--------------------------------------------------------------------
+* EA Mode 9 - PC-relative                                      nn(PC)
 *--------------------------------------------------------------------
 EA_9      MOVE.L    A4,A1           ; Address being disassembled
           JSR       ADV_W           ; Get the displacement word
 
 *--------------------------------------------------------------------
+* Entry point used by Bxx.S short branches - D1 holds displacement
 *--------------------------------------------------------------------
 EA_9A     EXT.L     D1              ; Sign extended to long word
           ADD.L     A1,D1
 
 *--------------------------------------------------------------------
+* Calculate effective address in hex. When disassembling in 2-pass
+* mode, store the address in the label table (DISMOD=0) or write it
+* to the buffer, but only if it lies within the address range of the
+* disassembly (this writes Lxxxx, otherwise $xxxxx).
 *--------------------------------------------------------------------
-EA_ADDR   MOVEQ     #'$',D0
-          TST.B     DISMOD(A6)
-          BLT.S     EA_BP
-          CMP.L     DISFRST(A6),D1
-          BCS.S     ST_LABEL
-          CMP.L     DISLAST(A6),D1
-          BHI.S     ST_LABEL
-          MOVEQ     #'L',D0
-          TST.B     DISMOD(A6)
-          BGT.S     ST_LABEL
-          MOVE.L    LBL_TBL(A6),A1
-EA_A_LP   CMPA.L    WRKSPTR(A6),A1
-          BGE.S     NEW_LABEL
-          CMP.L     (A1)+,D1
-          BNE.S     EA_A_LP
-          BRA.S     ST_LABEL
-NEW_LABEL JSR       ADD_WRK
-ST_LABEL  MOVE.B    D0,(A0)+
-          JMP       CN_ADDR
+EA_ADDR   MOVEQ     #'$',D0         ; Assume literal address
+          TST.B     DISMOD(A6)      ; Single pass disassembly?
+          BLT.S     EA_BP           ; yes, write it
+          CMP.L     DISFRST(A6),D1  ; Before start?
+          BCS.S     ST_LABEL        ; yes, jump
+          CMP.L     DISLAST(A6),D1  ; After end?
+          BHI.S     ST_LABEL        ; yes, jump
+          MOVEQ     #'L',D0         ; Make it a label
+          TST.B     DISMOD(A6)      ; 0 means 1st pass (collecting)
+          BGT.S     ST_LABEL        ; and 1 means 2nd pass (writing)
+          MOVE.L    LBL_TBL(A6),A1  ; get start of label table
+EA_A_LP   CMPA.L    WRKSPTR(A6),A1  ; end reached?
+          BGE.S     NEW_LABEL       ; yes, enter label
+          CMP.L     (A1)+,D1        ; Match address
+          BNE.S     EA_A_LP         ; Loop back if not found
+          BRA.S     ST_LABEL        ; Existing label found, skip
+NEW_LABEL JSR       ADD_WRK         ; Otherwise, enter new label
+ST_LABEL  MOVE.B    D0,(A0)+        ; Now write 'L' or '$'
+          JMP       CN_ADDR         ; .. followed by address
 
 *--------------------------------------------------------------------
-* Bad parameter in working out an effective address. Oops!
+* This writes the literal address, possibly followed by (BP) in case
+* of a relative address to the base of the program
 *--------------------------------------------------------------------
-EA_BP     MOVE.L    D1,D2
-          BSR.S     ST_LABEL
-          CMP.L     D1,D2
-          BEQ.S     EA_BP_EN
-          LEA       BPMSG,A1
-          JSR       COPY_LP
-EA_BP_EN  RTS
+EA_BP     MOVE.L    D1,D2           ; Save original address
+          BSR.S     ST_LABEL        ; Write address to the buffer
+          CMP.L     D1,D2           ; If in relative mode, D1 will
+          BEQ.S     EA_BP_EN        ; have been changed by the call
+          LEA       BPMSG,A1        ; to CN_ADDR, so add a (BP)
+          JSR       COPY_LP         ; suffix to indicate rel. mode
+EA_BP_EN  RTS                       ; Done
 
 *--------------------------------------------------------------------
-* Message to display when disassembling an instruction which has a
-* dubious effective address.
+* The (BP) suffix is added to a literal address to indicate that it's
+* relative to the base of the program (only in 1-pass disassemblies)
 *--------------------------------------------------------------------
 BPMSG     DC.B      '(BP)',0,0
 
 *--------------------------------------------------------------------
+* EA Mode 10 - PC-relative with index
 *--------------------------------------------------------------------
 EA_A      JSR       ADV_W           ; Get the displacement word
           MOVE.W    D1,-(A7)        ; Save worker

@@ -2998,7 +2998,7 @@ WRKERRMSG DC.B      0,18,'Workspace Overflow'
 * A5 holding the ouput file ID too.
 *--------------------------------------------------------------------
 DIS_START MOVE.L    WRKSPTR(A6),LBL_TBL(A6) ; Set start of label table
-          SF        DISMOD(A6)      ; Flag - 'pass 1 of 2'
+          SF        DISMOD(A6)      ; Flag 'pass 1 of 2'
           MOVE.L    DISFRST(A6),A4  ; Address to be disassembled
 
 DIS1_LP   MOVE.L    A5,-(A7)        ; Save output channel ID
@@ -3008,7 +3008,7 @@ DIS1_LP   MOVE.L    A5,-(A7)        ; Save output channel ID
           BNE.S     WRKSP_ERR       ; Sadly, yes
           CMPA.L    DISLAST(A6),A4  ; No - have we finished?
           BLS.S     DIS1_LP         ; No, do some more
-          ADDQ.B    #1,DISMOD(A6)   ; Flag - 'pass 2 of 2'
+          ADDQ.B    #1,DISMOD(A6)   ; Flag 'pass 2 of 2'
           MOVE.L    DISFRST(A6),A4  ; Get the start address again
           MOVE.L    A5,-(A7)        ; Save the worker again        
 
