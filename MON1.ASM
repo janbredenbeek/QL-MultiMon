@@ -3527,7 +3527,7 @@ NXTJOB    ADDQ.W    #4,A5           ; Point at next job table entry
 * So we should possibly test for -2 and flag 'W' for waiting, -1 is
 * the only (?) flag for 'S' (Suspended) etc?
 *--------------------------------------------------------------------
-TST.W     $14(A4)                    ; JB_STAT = 0 = active
+          TST.W     $14(A4)         ; JB_STAT = 0 = active
           BEQ.S     NOT_SUSP        ; Hmm, only negative is suspended
           MOVE.B    #'S',-1(A0)     ; Overwrite previous space with S flag
 
