@@ -2655,15 +2655,7 @@ FIND_HEX  MOVEQ     #':',D1         ; Prompt for COMMAND window
           SUBQ.W    #1,D7           ; No linefeed required
           BLT.S     FH_DEFLT        ; No hex got, use previous search
           MOVE.W    D7,(A5)+        ; Word count stored, minus linefeed
-
-*--------------------------------------------------------------------
-* First time through, we have to start searching from the current 
-* memory pointer, so make sure we decrement A3 before jumping to
-* search. 
-*--------------------------------------------------------------------
-          MOVE.L    MEMPTR(A6),A3   ; Get current address
-          SUBQ.W    #1,A3           ; Prepare for FH_LOOP (Extends to long!) 
-          BRA.S     FH_LOOP         ; Go look for new search hex string
+          BRA.S     FH_MEM          ; Go look for new search hex string
 
 *--------------------------------------------------------------------
 * Pick up the previous search string size if nothing entered.
@@ -2676,6 +2668,11 @@ FH_DEFLT  MOVE.W    (A5)+,D7        ; Use existing counter
 * A3 will be the current memory pointer.
 * We use A4 and A2 as working copies of A5 and A3 each time we search
 * for the desired text and D7 will be a copy of D6 for each search.
+*
+* ???? -> BUG
+* I think we should be looking for MEMPTR(A6)-1 into A3 here. If we
+* do the following, we always skip the first byte of the search as
+* we never look at the byte in A3 first time around.
 *--------------------------------------------------------------------
 FH_MEM    MOVE.L    MEMPTR(A6),A3   ; Start address = current memory pointer
 
