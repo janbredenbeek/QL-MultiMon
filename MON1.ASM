@@ -3519,7 +3519,7 @@ NXTJOB    ADDQ.W    #4,A5           ; Point at next job table entry
           MOVE.W    #$2020,(A0)+    ; And two more spaces
 
 *--------------------------------------------------------------------
-* ???? -> BUGFIX
+* ???? -> BUG
 *
 * Is this a bug? The values of JB_STAT are:
 *   -2 = Waiting for another job;
@@ -3531,14 +3531,8 @@ NXTJOB    ADDQ.W    #4,A5           ; Point at next job table entry
 * the only (?) flag for 'S' (Suspended) etc?
 *--------------------------------------------------------------------
           TST.W     $14(A4)         ; JB_STAT = 0 = active
-          BGE.S     NOT_SUSP        ; Job is active or delayed for rescehdule
-          CMPI.W    #-2,$14(A4)     ; Is job waiting for another?
-          BEQ.S     JOB_WAIT        ; Yes, skip
-
-          MOVE.B    #'S',-1(A0)     ; Show job as suspended
-          BRA.S     NOT_SUSP        ; Skip waiting code
-
-JOB_WAIT  MOVE.B    #'W',-1(A0)     ; Show job is waiting
+          BEQ.S     NOT_SUSP        ; Hmm, only negative is suspended
+          MOVE.B    #'S',-1(A0)     ; Overwrite previous space with S flag
 
 *--------------------------------------------------------------------
 * The job being looked at is not suspended (but see above) and the 
