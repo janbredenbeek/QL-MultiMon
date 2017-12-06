@@ -3614,18 +3614,25 @@ ENDJ1     LEA       VER_MSG,A1      ; 'QDOS Version: ' message
 * printing it out. Note that any value of $F000 kb or higher will be
 * printed as negative.
 *
-* ???? -> BUG
-* I think we need to check if the top bit of D1.W is a 1 and if so,
-* divide by another 1024 and print a M rather than a K here.
+* ???? -> BUGFIX
+* If bit 15 of D1 is set after dividing by 1024, divide again and use
+* Megabytes rather than Kilobytes for the total.
 *--------------------------------------------------------------------
           MOVEQ     #MT_FREE,D0     ; Prepare to get free space
           TRAP      #1              ; Go get it
           LSR.L     #8,D1           ; Divide by 1024 - part 1
           LSR.L     #2,D1           ; Continued
-          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVEQ     #'K',D7         ; Assume Kilobytes
+          BTST      #15,D1          ; Have we gone into megabytes?
+          BEQ.S     V_FREE          ; No, skip
+          MOVEQ     #'M',D7         ; Yes, flag Megabytes
+          LSR.L     #8,D1           ; Divide by 1024 again
+          LSR.L     #2,D1
+
+V_FREE    MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
           MOVE.W    UT_MINT,A2      ; Prepare to print a word
           JSR       (A2)            ; Print free memory in KB
-          MOVEQ     #'K',D1         ; Needs a 'K'
+          MOVE.B    D7,D1           ; Needs a 'K' or 'M'
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3              ; Print it.
           BRA       MAIN_1
