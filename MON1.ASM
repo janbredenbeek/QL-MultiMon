@@ -201,7 +201,7 @@ SETTRAPS  PEA       EXBRKPNT        ; Code for this trap's vector
 * count and A4 points at the first window definition, A5 points at 
 * the start of a consecutive storage area for the channel IDs. 
 *--------------------------------------------------------------------
-          MOVEQ     #6,D7           ; 6 windows to open
+          MOVEQ     #5,D7           ; 6 windows to open
           LEA       WNDPRMS,A4      ; PROMPT window definition
           LEA       PROMPTWND(A6),A5    ; First window's storage area
 
