@@ -133,7 +133,6 @@ CN_STORE  ADDI.B    #'0',D2         ; ASCIIfy the digit/letter
           RTS                       ; Done
 
 *--------------------------------------------------------------------
-
 *--------------------------------------------------------------------
 DEST_EA   MOVEQ     #7,D0
           MOVE.W    D7,D5
@@ -438,7 +437,7 @@ EA_INDEX  MOVEQ     #'D',D0         ; Assumes a Data index register
 INDEXREG  MOVE.B    D0,(A0)+        ; Buffer the index register type
           ROL.W     #4,D1           ; Get the register number
           ANDI.B    #7,D1           ; Mask it out
-          ADDI.B    #'0',D1         ; ASCIIIfy it
+          ADDI.B    #'0',D1         ; ASCIIfy it
           MOVE.B    D1,(A0)+        ; Buffer the index register number
           MOVE.B    #'.',(A0)+      ; And a dot
           MOVEQ     #'W',D0         ; Assume Word sized index register
@@ -470,10 +469,12 @@ ALIGN     MOVE.L    A4,D0           ; Copy address to D0
           RTS                       ; Done
 
 *--------------------------------------------------------------------
+* Advance A4 to the next desired address. If D4 is 2 then advance by 
+* 4 bytes. Otherwise, advance by 2 bytes.
 *--------------------------------------------------------------------
-ADVANCE   CMPI.B    #2,D4
-          BEQ.S     ADV_L
-          MOVEQ     #0,D1
+ADVANCE   CMPI.B    #2,D4           ; Long advance?
+          BEQ.S     ADV_L           ; Yes.
+          MOVEQ     #0,D1           ; Clear all of D1.
 
 *--------------------------------------------------------------------
 * Fetch a word sized operand, offset etc from the next address in 
@@ -507,31 +508,34 @@ COPY_END  RTS                       ; Done
 * All entries are zero terminated.
 * D1.W Holds the actual entry in the list that we want to extract.
 *--------------------------------------------------------------------
-NXTENTRY  TST.B     (A1)+
-          BNE.S     NXTENTRY
-DIS_INDEX DBF       D1,NXTENTRY
+NXTENTRY  TST.B     (A1)+           ; Found the terminating zero?
+          BNE.S     NXTENTRY        ; No, keep looking
+DIS_INDEX DBF       D1,NXTENTRY     ; Yes, find the next one(s)
 
 *--------------------------------------------------------------------
 * Copy an entry from a list of zero terminated strings to the buffer
 * in (A0). The list is at (A1). 
 *--------------------------------------------------------------------
-COPY_LP   MOVE.B    (A1)+,D0
-          BEQ.S     COPY_END
-          MOVE.B    D0,(A0)+
-          BRA.S     COPY_LP
+COPY_LP   MOVE.B    (A1)+,D0        ; Grab a byte
+          BEQ.S     COPY_END        ; We are done on a zero byte
+          MOVE.B    D0,(A0)+        ; Otherwise, copy it
+          BRA.S     COPY_LP         ; And keep going
 
 *--------------------------------------------------------------------
+* Extract a two byte condition code from the table at (A1) into the
+* buffer at (A0). D7 holds the op-code word.The condition code is in
+* bits 8-11.
 *--------------------------------------------------------------------
-CONDITION MOVE.W    D7,D1
-          ANDI.W    #$0F00,D1
-          LSR.W     #7,D1
-          MOVE.B    0(A1,D1.W),(A0)+
-          MOVE.B    1(A1,D1.W),(A0)+
-          RTS
+CONDITION MOVE.W    D7,D1           ; Copy op-code
+          ANDI.W    #$0F00,D1       ; Keep only condition code bits
+          LSR.W     #7,D1           ; Shift down bit 8-> bit 1 (CC*2)
+          MOVE.B    0(A1,D1.W),(A0)+    ; First byte of CC
+          MOVE.B    1(A1,D1.W),(A0)+    ; Second byte of CC
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
-* Condition codes table. Two bytes for each condition code. DBRA is
-* actually DBF in this table.
+* Condition codes table. Two bytes for each condition code. 'DBRA' is
+* actually 'DBF ' in this table.
 *--------------------------------------------------------------------
 CONDTAB1  DC.B      'T F HILSCCCSNEEQVCVSPLMIGELTGTLE'
 
@@ -544,6 +548,7 @@ CONDTAB2  DC.B      'RASRHILSCCCSNEEQVCVSPLMIGELTGTLE'
 *--------------------------------------------------------------------
 *--------------------------------------------------------------------
 FIND_LBL  MOVE.L    LBL_TBL(A6),A1
+
 FINDLBL2  CMPA.L    WRKSPTR(A6),A1
           BGE.S     LBL_NOTF
           CMPA.L    (A1)+,A4
@@ -563,12 +568,18 @@ LBL_NOTF  MOVEQ     #-7,D0
 * A4 = Address to disassemble.
 * A5 = 
 *--------------------------------------------------------------------
-DISASSEM  LEA       DISBUF(A6),A0
-          MOVE.L    A0,A1
-          MOVEQ     #$20,D1
-          MOVEQ     #DISBUFLEN-1,D0
-CLRDISBUF MOVE.B    D1,(A1)+
-          DBF       D0,CLRDISBUF
+* Start by space filling the entire disassembly buffer.
+*--------------------------------------------------------------------
+DISASSEM  LEA       DISBUF(A6),A0   ; Dissassembly buffer
+          MOVE.L    A0,A1           ; Copy
+          MOVEQ     #$20,D1         ; Space character
+          MOVEQ     #DISBUFLEN-1,D0 ; Byte counter
+
+CLRDISBUF MOVE.B    D1,(A1)+        ; Clear a byte
+          DBF       D0,CLRDISBUF    ; Do the rest
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
           MOVE.L    A4,D1
           JSR       CN_ADDR
           LEA       1(A0),A5
@@ -580,10 +591,16 @@ CLRDISBUF MOVE.B    D1,(A1)+
           MOVE.B    #'L',(A0)+
           MOVE.L    A4,D1
           JSR       CN_ADDR
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 TAB_MNEM  LEA       MNFIELD(A6),A0
           TST.B     DISMOD(A6)
           BLT       DIS_INST
           MOVE.L    DATATBL(A6),A1
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DATA_LOOP CMPA.L    LBL_TBL(A6),A1
           BGE       DIS_INST
           MOVE.L    (A1)+,D6
@@ -606,7 +623,13 @@ DATA_LOOP CMPA.L    LBL_TBL(A6),A1
           BGT.S     DATA_LONG
           MOVEQ     #3,D5
           BRA.S     BYTE_ENT
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 BYTE_LOOP MOVE.B    #',',(A0)+
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 BYTE_ENT  MOVE.B    (A4)+,D1
           EXG       A0,A5
           JSR       CN_HEXB
@@ -620,13 +643,21 @@ BYTE_ENT  MOVE.B    (A4)+,D1
           MOVE.B    D1,(A0)+
           MOVE.B    D0,(A0)+
           BRA.S     B_NEXT
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 B_HEX     JSR       BTOHEX
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 B_NEXT    CMPA.L    D7,A4
           BHI.S     B_END
           BSR       FIND_LBL
           DBEQ      D5,BYTE_LOOP
 B_END     RTS
 
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DATA_WORD JSR       ADV_W
           JSR       WTOHEX
           CMPA.L    D7,A4
@@ -636,39 +667,62 @@ DATA_WORD JSR       ADV_W
           MOVEQ     #0,D7
           MOVE.B    #',',(A0)+
           BRA.S     DATA_WORD
+
+*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 DATA_LONG JSR       ADV_L
           JMP       LTOHEX
 
-DIS_INST  JSR       ADV_W
-          MOVE.W    D1,D7
+*--------------------------------------------------------------------
+* Disassemble an instruction word.
+* A4 = where from.
+* The high nibble of the instruction is used to index the linetable
+* and from there, a jump is made to the decoding code itself.
+*--------------------------------------------------------------------
+DIS_INST  JSR       ADV_W           ; Advance A4 to next word
+          MOVE.W    D1,D7           ; Copy word to D7
           MOVEQ     #0,D4
-          MOVE.B    D1,D4
-          LSR.B     #6,D4
-          ANDI.W    #$F000,D1
-          ROL.W     #5,D1
-          MOVE.W    LINETAB(PC,D1.W),D1
-          JMP       LINETAB(PC,D1.W)
+          MOVE.B    D1,D4           ; Low byte
+          LSR.B     #6,D4           ; Shift bits 7-6 -> 1-0
+          ANDI.W    #$F000,D1       ; Isolate high nibble
+          ROL.W     #5,D1           ; High nibble * 2
+          MOVE.W    LINETAB(PC,D1.W),D1 ; Table start
+          JMP       LINETAB(PC,D1.W)    ; Decode instruction type
 
-LINETAB   DC.W      LINE0-LINETAB
-          DC.W      LINE1-LINETAB
-          DC.W      LINE2-LINETAB
-          DC.W      LINE3-LINETAB
-          DC.W      LINE4-LINETAB
-          DC.W      LINE5-LINETAB
-          DC.W      LINE6-LINETAB
-          DC.W      LINE7-LINETAB
-          DC.W      LINE8-LINETAB
-          DC.W      LINE9-LINETAB
-          DC.W      ILL_INST-LINETAB
-          DC.W      LINEB-LINETAB
-          DC.W      LINEC-LINETAB
-          DC.W      LINED-LINETAB
-          DC.W      LINEE-LINETAB
-          DC.W      ILL_INST-LINETAB
+*--------------------------------------------------------------------
+* The high nibble tells us how to decode the instruction word. This
+* is a table of offsets to the decoding code.
+* There are no legal instructions with $A or $F as the high nibble -
+* well, $F instructions are for the co-processor or 68040 only. They
+* are ignored here.
+*--------------------------------------------------------------------
+LINETAB   DC.W      LINE0-LINETAB       ; ORI, Bxxx, MOVEP, ANDI, SUBI,
+;                                       ; ADDI, EORI, CMPI
+          DC.W      LINE1-LINETAB       ; MOVES (68010), MOVE.B
+          DC.W      LINE2-LINETAB       ; MOVE.L, MOVEA.L
+          DC.W      LINE3-LINETAB       ; MOVEA.W, MOVE.W
+          DC.W      LINE4-LINETAB       ; Everything not seen elsewhere!
+          DC.W      LINE5-LINETAB       ; ADDQ, Scc, DBcc, SUBQ
+          DC.W      LINE6-LINETAB       ; Bcc, BRA, BSR
+          DC.W      LINE7-LINETAB       ; MOVEQ
+          DC.W      LINE8-LINETAB       ; OR, DIVU, SBCD, DIVS
+          DC.W      LINE9-LINETAB       ; SUB, SUBA, SUBX
+          DC.W      ILL_INST-LINETAB    ; Nothing here
+          DC.W      LINEB-LINETAB       ; CMP, CMPA, CMPM, EOR
+          DC.W      LINEC-LINETAB       ; AND, MULU, ABCD, EXG, MULS
+          DC.W      LINED-LINETAB       ; ADD, ADDA, ADDX
+          DC.W      LINEE-LINETAB       ; Shift/rotate
+          DC.W      ILL_INST-LINETAB    ; Nothing here
 
+*--------------------------------------------------------------------
+* LineA or any other illegal instruction.
+*--------------------------------------------------------------------
 ILL_INST  LEA       MN_ILL,A1
           JMP       COPY_LP
 
+*--------------------------------------------------------------------
+* Line0 - ORI, Bxxx, MOVEP, ANDI, SUBI, ADDI, EORI, CMPI.
+*--------------------------------------------------------------------
 LINE0     LEA       MN_LINE0,A1
           MOVE.W    D7,D1
           ANDI.W    #$0E00,D1
@@ -737,22 +791,43 @@ MOVEP_2   JSR       SECNDREG
           AND.B     D7,D5
           JMP       EA_5
 
-LINE1     MOVEQ     #0,D4
+*--------------------------------------------------------------------
+* Line1 - MOVES (68010), MOVE.B.
+*--------------------------------------------------------------------
+LINE1     MOVEQ     #0,D4           ; Flag = byte size
           BRA.S     D_MOVE
-LINE2     MOVEQ     #2,D4
+
+*--------------------------------------------------------------------
+* Line2 - MOVEA.L, MOVE.L.
+*--------------------------------------------------------------------
+LINE2     MOVEQ     #2,D4           ; Flag = long size
           BRA.S     D_MOVE
-LINE3     MOVEQ     #1,D4
-D_MOVE    LEA       MN_MOVE,A1
-          JSR       COPY_LP
-          JSR       GT_SIZE
-          TST.B     D4
-          BNE.S     MOVE_WL
+
+*--------------------------------------------------------------------
+* Line3 - MOVEA.W, MOVE.W.
+*--------------------------------------------------------------------
+LINE3     MOVEQ     #1,D4           ; Flag = word size
+
+*--------------------------------------------------------------------
+* D4 = size for MOVE instructions.
+*--------------------------------------------------------------------
+D_MOVE    LEA       MN_MOVE,A1      ; 'MOVE'
+          JSR       COPY_LP         ; Copy to buffer
+          JSR       GT_SIZE         ; Copy size to buffer
+          TST.B     D4              ; Check size flag
+          BNE.S     MOVE_WL         ; Not byte, skip
           JSR       EA_DATA
           BRA.S     MOVE_2
 MOVE_WL   JSR       EA_DECODE
 MOVE_2    MOVE.B    #',',(A0)+
           JMP       DEST_EA
 
+*--------------------------------------------------------------------
+* Line4 - NEGX, MOVE (SR), CHK, LEA, CLR, MOVE (CCR), NEG, NOT, NBCD,
+*         SWAP, PEA, EXT.W, MOVEM, EXT.L, TST, TAS, ILLEGAL, TRAP,
+*         LINK, UNLK, MOVE (USP), RESET, NOP, STOP, RTE, RTD (68010),
+*         RTS, TRAPV, RTR, MOVEC (68010), JSR, JMP.
+*--------------------------------------------------------------------
 LINE4     BTST      #8,D7
           BEQ.S     L4_MISC
           TST.B     D7
@@ -1008,6 +1083,9 @@ L709FE    ADDI.B    #$30,D1
           MOVE.B    #$2C,(A0)+
           RTS
 
+*--------------------------------------------------------------------
+* Line5 - ADDQ, Scc, DBcc, SUBQ.
+*--------------------------------------------------------------------
 LINE5     CMPI.B    #$03,D4
           BEQ.S     L70A2C
           LEA       MN_ADDQ,A1
@@ -1036,6 +1114,9 @@ D_SCC     MOVE.B    #'S',(A0)+
           LEA       OPR_FLD(A6),A0
           JMP       EA_DALT
 
+*--------------------------------------------------------------------
+* Line6 - Bcc, BRA, BSR.
+*--------------------------------------------------------------------
 LINE6     MOVE.B    #'B',(A0)+
           LEA       CONDTAB2,A1
           JSR       CONDITION
@@ -1051,6 +1132,9 @@ LINE6     MOVE.B    #'B',(A0)+
 BR_LONG   LEA       OPR_FLD(A6),A0
           JMP       EA_9
 
+*--------------------------------------------------------------------
+* Line7 - MOVEQ.
+*--------------------------------------------------------------------
 LINE7     BTST      #8,D7
           BNE       ILL_INST
           LEA       MN_MOVEQ,A1
@@ -1062,6 +1146,9 @@ LINE7     BTST      #8,D7
           MOVE.B    #',',(A0)+
           JMP       SECNDREG
 
+*--------------------------------------------------------------------
+* LineC - AND, MULU, ABCD, EXG, MULS.
+*--------------------------------------------------------------------
 LINEC     LEA       MN_LINEC,A1
           MOVE.W    D7,D1
           ANDI.W    #$01F8,D1
@@ -1087,6 +1174,9 @@ DO_EXG    LEA       MN_EXG,A1
           MOVE.B    #',',(A0)+
           JMP       EA_DECODE
 
+*--------------------------------------------------------------------
+* Line8 - OR, DIVU, SBCD, DIVS.
+*--------------------------------------------------------------------
 LINE8     LEA       MN_LINE8,A1
 D_L8      CMPI.B    #3,D4
           BEQ.S     MUL_DIV
@@ -1124,8 +1214,15 @@ OR_DIV    JSR       EA_DATA
           MOVE.B    #',',(A0)+
           JMP       SECNDREG
 
+*--------------------------------------------------------------------
+* Line9 - SUB, SUBA, SUBX.
+*--------------------------------------------------------------------
 LINE9     LEA       MN_LINE9,A1
           BRA.S     D_L9
+
+*--------------------------------------------------------------------
+* LineD - ADD, ADDA, ADDX.
+*--------------------------------------------------------------------
 LINED     LEA       MN_LINED,A1
 D_L9      CMPI.B    #3,D4
           BEQ.S     D_SUBA
@@ -1166,6 +1263,9 @@ SUB_DX1   JSR       DIS_INDEX
           MOVE.B    #',',(A0)+
           JMP       (A2)
 
+*--------------------------------------------------------------------
+* LineB - CMP, CMPA, EOR, CMPM.
+*--------------------------------------------------------------------
 LINEB     LEA       MN_LINEB,A1
           CMPI.B    #3,D4
           BEQ.S     D_SUBA
@@ -1183,6 +1283,9 @@ LINEB     LEA       MN_LINEB,A1
           LEA       EA_3,A2
           BRA       SBCD_DATA
 
+*--------------------------------------------------------------------
+* LineE - Shift/Rotate instructions.
+*--------------------------------------------------------------------
 LINEE     LEA       MN_LINEE,A1
           CMPI.B    #3,D4
           BEQ.S     SH_MEM
@@ -1221,6 +1324,10 @@ DIR_MOVE  MOVE.B    D0,(A0)+
           RTS
 
 *--------------------------------------------------------------------
+* The following table of zero terminated opcodes is used to copy the
+* instruction text, or part thereof, into the output buffer when the
+* instruction has been decoded enough to allow the instruction text
+* to be determined. 
 *--------------------------------------------------------------------
 MN_ILL    DC.B      '*ILLEGAL OPCODE*',0
 MN_SRCCR  DC.B      'CCR',0,'SR',0

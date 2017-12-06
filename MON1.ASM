@@ -378,7 +378,7 @@ WNDPAR2   DC.B      0,0,2,7
 *--------------------------------------------------------------------
 SIGNON    DC.W      39
           DC.B      'MULTIMON V2.1',10
-          DC.B      127, ' 1986, 87 JAN BREDENBEEK'
+          DC.B      127,' 1986, 87 JAN BREDENBEEK'
           DS.W      0
 
 *--------------------------------------------------------------------
@@ -521,7 +521,7 @@ RESTREGS  MOVEQ     #0,D0               ; MT_INF - Get QDOS information
 * monitor, restore its registers from our storage and when the RTE
 * fires, the job will run from its PC and with the SR set as per what
 * we put on the SSP.
-0*--------------------------------------------------------------------
+*--------------------------------------------------------------------
 REL_JB    CLR.W     $14(A0)             ; Monitored job is now active
           MOVE.L    IM_PC(A6),-(A7)     ; Monitored job's PC on SSP
           MOVE.W    IM_SR(A6),-(A7)     ; Monitored job's SR on SSP
@@ -3689,7 +3689,7 @@ HLP1_END  EQU       *
 *--------------------------------------------------------------------
 HELPMSG2  DC.W      HLP2_END-*-2
           DC.B      '                             QL MULTIMON V2.1',10
-          DC.B      '                       ', 127,' 1986, 87 BY JAN BREDENBEEK',10,10
+          DC.B      '                       ',127,' 1986, 87 BY JAN BREDENBEEK',10,10
           DC.B      'COMMANDS:',10,10
           DC.B      188,189,190,191,': CHANGE MEMORY POINTER            ALT-',188,189,190,191,': CHANGE REGISTER POINTER',10
           DC.B      'F2: MEMORY DUMP TO SCREEN              F3: DISASSEMBLE TO SCREEN',10
