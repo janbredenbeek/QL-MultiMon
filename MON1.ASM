@@ -3620,8 +3620,8 @@ ENDJ1     LEA       VER_MSG,A1      ; 'QDOS Version: ' message
           LSR.L     #8,D1           ; Divide by 1024 - part 1
           LSR.L     #2,D1           ; Continued
           MOVEQ     #'K',D7         ; Assume Kilobytes
-          BTST      #15,D1          ; Have we gone into megabytes?
-          BEQ.S     V_FREE          ; No, skip
+          CMPI.L    #$7FFF,D1       ; Have we gone into megabytes?
+          BLE.S     V_FREE          ; No, skip
           MOVEQ     #'M',D7         ; Yes, flag Megabytes
           LSR.L     #8,D1           ; Divide by 1024 again
           LSR.L     #2,D1
