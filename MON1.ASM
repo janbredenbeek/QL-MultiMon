@@ -3619,7 +3619,14 @@ ENDJ1     LEA       VER_MSG,A1      ; 'QDOS Version: ' message
           TRAP      #1              ; Go get it
           LSR.L     #8,D1           ; Divide by 1024 - part 1
           LSR.L     #2,D1           ; Continued
-          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVEQ     #'K',D7         ; Assume Kilobytes
+          CMPI.L    #$7FFF,D1       ; Have we gone into megabytes?
+          BLE.S     V_FREE          ; No, skip
+          MOVEQ     #'M',D7         ; Yes, flag Megabytes
+          LSR.L     #8,D1           ; Divide by 1024 again
+          LSR.L     #2,D1
+
+V_FREE    MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
           MOVE.W    UT_MINT,A2      ; Prepare to print a word
           JSR       (A2)            ; Print free memory in KB
           MOVEQ     #'K',D1         ; Needs a 'K'
