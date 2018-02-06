@@ -147,7 +147,13 @@ DEST_EA   MOVEQ     #7,D0           ; Mask for register and ROL count
           MOVE.W    D7,D6           ; Copy opcode again
           ROR.W     #6,D6           ; Move mode to bits 0-2
           AND.W     D0,D6           ; Mask out the mode
-          TST.B     D4              ; ???? -> TODO
+
+*--------------------------------------------------------------------
+* MOVE.B is not permitted with an Address register as the destination
+* so test D4 for the size and zero indicates .B - the values in D4 =
+* B=0, .W=1, .L=2. (JB)
+*--------------------------------------------------------------------
+          TST.B     D4              ; Byte Size - not allowed with An
           BNE.S     DEST_CMP
           CMPI.B    #1,D6           ; Cannot be An (EA mode 1)
           BEQ.S     EA_ERROR        ; Buffer a question mark for errors
@@ -156,6 +162,8 @@ DEST_EA   MOVEQ     #7,D0           ; Mask for register and ROL count
 * If the mode is not 7, then we are done here, skip out. Otherwise we
 * are looking at the destination EA, so we only allow "registers" 0-3
 * as 4 = #immediate, and that's never going to be a destination!
+* Modes 9 and above are PC-relative or immediate and are not allowed 
+* as destination address. (JB)
 *
 * This does of course, trash the register number but only for mode 7.
 *--------------------------------------------------------------------
@@ -233,11 +241,13 @@ EA_CTRL   BSR.S     GET_MR          ; Get EA mode in D6, REG in D5
           BRA.S     EA_DEC_1        ; Decode the EA
 
 *--------------------------------------------------------------------
-* A Data Alterable Effective Address is required here.
+* A Data Alterable Effective Address is required here. Modes 9 and 
+* above (PC-relative or immediate) are illegal here. (JB)
 *--------------------------------------------------------------------
 EA_DALT   BSR.S     GET_MR          ; Get EA mode in D6, REG in D5
           CMPI.B    #1,D6           ; Mode is An?
           BEQ.S     EA_ERROR        ; Buffer a question mark for errors
+
 EA_ALT    BSR.S     GET_MR          ; Get EA mode in D6, REG in D5
           CMPI.B    #8,D6           ; Mode is nnnnnn.l or less?
           BGT.S     EA_ERROR        ; Buffer a question mark for errors
@@ -287,7 +297,7 @@ GT_SIZE   MOVE.B    #'.',(A0)+      ; Buffer the dot
 *--------------------------------------------------------------------
 * Table of instruction sizes indexed by D4.W from GT_SIZE above. 
 *--------------------------------------------------------------------
-SIZETAB   DC.B      'BWL',0
+SIZETAB   DC.B      'BWL',0         ; Table of instruction sizes
 
 *--------------------------------------------------------------------
 * Some instructions are not byte sized, so this deals with those that
@@ -527,13 +537,13 @@ INDXSIZE  MOVE.B    D0,(A0)+        ; Buffer the size letter
 * D6 = EA Mode
 * D7 = Opcode word
 *--------------------------------------------------------------------
-EA_B      BSR.S     ADVANCE
+EA_B      BSR.S     ADVANCE         ; Get the B/W/L following into D1
           MOVE.B    #'#',(A0)+      ; Buffer the hash
           MOVE.B    D4,D0           ; Size .B=0, .W=1, .L=2
-          BEQ       BTOHEX          ; .B
+          BEQ       BTOHEX          ; .B - Buffer D1.B as hex
           SUBQ.B    #1,D0
-          BEQ       WTOHEX          ; .W
-          BRA       LTOHEX          ; .L
+          BEQ       WTOHEX          ; .W - Buffer D1.W as hex
+          BRA       LTOHEX          ; .L - Buffer D1.L as hex
 
 *--------------------------------------------------------------------
 * Make sure that the address in A4 is even. A4 is the pointer to the
@@ -547,7 +557,9 @@ ALIGN     MOVE.L    A4,D0           ; Copy address to D0
 
 *--------------------------------------------------------------------
 * Advance A4 to the next desired address. If D4 is 2 then advance by 
-* 4 bytes. Otherwise, advance by 2 bytes.
+* 4 bytes. Otherwise, advance by 2 bytes. Buffers the byte, word or
+* long value read from the following address space at a buffer in A5
+* probably for later use when dumping the instructions hex.
 *--------------------------------------------------------------------
 ADVANCE   CMPI.B    #2,D4           ; Long advance?
           BEQ.S     ADV_L           ; Yes.
@@ -572,7 +584,8 @@ ADV_L     BSR       ALIGN           ; Make sure A4 is even
 
 *--------------------------------------------------------------------
 * Convert the word or long in D1 to a sequence of hex characters as
-* defined by the value in D0.B in the buffer at (A0) using A5.
+* defined by the value in D0.B in the buffer at A5 using A0 in a temp
+* manner.
 *--------------------------------------------------------------------
 ADV_2     EXG       A0,A5           ; A5 is the output buffer pointer
           JSR       CN_HEX          ; Convert D1 to D0.B hex chars
@@ -623,20 +636,22 @@ CONDTAB1  DC.B      'T F HILSCCCSNEEQVCVSPLMIGELTGTLE'
 CONDTAB2  DC.B      'RASRHILSCCCSNEEQVCVSPLMIGELTGTLE'
 
 *--------------------------------------------------------------------
+* Checks if the current address in A4 is an address in the label 
+* table. Returns -7 if not found, otherwise Z is set if found.
 *--------------------------------------------------------------------
-FIND_LBL  MOVE.L    LBL_TBL(A6),A1
+FIND_LBL  MOVE.L    LBL_TBL(A6),A1  ; Start of label table
 
-FINDLBL2  CMPA.L    WRKSPTR(A6),A1
-          BGE.S     LBL_NOTF
-          CMPA.L    (A1)+,A4
-          BNE.S     FINDLBL2
-          RTS
+FINDLBL2  CMPA.L    WRKSPTR(A6),A1  ; Are we done yet?
+          BGE.S     LBL_NOTF        ; Yes, A4 is not a label
+          CMPA.L    (A1)+,A4        ; Check if A4 is a label
+          BNE.S     FINDLBL2        ; Loop around
+          RTS                       ; Done. Z set if A4 is in the table
 
 *--------------------------------------------------------------------
 * NOT FOUND (-7) Error return.
 *--------------------------------------------------------------------
-LBL_NOTF  MOVEQ     #-7,D0
-          RTS
+LBL_NOTF  MOVEQ     #-7,D0          ; Z is unset if A4 is not  a label
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Disassemble memory - helper routine.
@@ -655,100 +670,124 @@ CLRDISBUF MOVE.B    D1,(A1)+        ; Clear a byte
           DBF       D0,CLRDISBUF    ; Do the rest
 
 *--------------------------------------------------------------------
-* Convert the address to hex first
+* Convert the current address to hex first as a label - L######## but
+* only if A4 is in the labels table and we are on a multi-pass 
+* disassemble.
 *--------------------------------------------------------------------
           MOVE.L    A4,D1           ; Current instruction address
           JSR       CN_ADDR         ; Convert to 8 hex characters
-          LEA       1(A0),A5
-          TST.B     DISMOD(A6)      ; 0 = pass 1 of 2
-          BLE.S     TAB_MNEM        ; negative = single pass disassembly
-          BSR.S     FIND_LBL        ; Positive = 2 pass 
-          BNE.S     TAB_MNEM
-          LEA       LBL_FLD(A6),A0
-          MOVE.B    #'L',(A0)+
-          MOVE.L    A4,D1
-          JSR       CN_ADDR
+          LEA       1(A0),A5        ; Temporary buffer? TODO => ????
+          TST.B     DISMOD(A6)      ; -ve = 1 pass, +ve = 2 pass, 0 = pass 1 of 2
+          BLE.S     TAB_MNEM        ; Single pass disassembly, no labels
+          BSR.S     FIND_LBL        ; Is A4 a label?
+          BNE.S     TAB_MNEM        ; No. Skip
+          LEA       LBL_FLD(A6),A0  ; Label position in output buffer
+          MOVE.B    #'L',(A0)+      ; Buffer the 'L'
+          MOVE.L    A4,D1           ; Label's address
+          JSR       CN_ADDR         ; Buffer address
 
 *--------------------------------------------------------------------
+* Now work out if we are decoding a data area as defined by the user
+* if, and only if, we are running a multi-pass disassembly.
 *--------------------------------------------------------------------
 TAB_MNEM  LEA       MNFIELD(A6),A0  ; Advance buffer pointer
           TST.B     DISMOD(A6)      ; Single pass disassembly?
           BLT       DIS_INST        ; Yes, skip
-          MOVE.L    DATATBL(A6),A1
+          MOVE.L    DATATBL(A6),A1  ; User supplied data areas
 
 *--------------------------------------------------------------------
+* Checks if the current address in A4 is part of a data area. Uses D6
+* as the start and D7 as the end of this particular data area. The
+* start address has the high byte flagging the data size:
+* $FF = DC.B, $00 = DC.W and $01 = DC.L.
 *--------------------------------------------------------------------
-DATA_LOOP CMPA.L    LBL_TBL(A6),A1
-          BGE       DIS_INST
-          MOVE.L    (A1)+,D6
-          MOVE.L    (A1)+,D7
-          MOVE.L    D6,D1
-          ANDI.L    #$00FFFFFF,D1
-          CMPA.L    D1,A4
-          BCS.S     DATA_LOOP
-          CMPA.L    D7,A4
-          BHI.S     DATA_LOOP
-          MOVE.B    #'D',(A0)+
-          MOVE.B    #'C',(A0)+
-          ROL.L     #8,D6
-          MOVE.B    D6,D4
+DATA_LOOP CMPA.L    LBL_TBL(A6),A1  ; Reached end yet?
+          BGE       DIS_INST        ; Yes, skip
+          MOVE.L    (A1)+,D6        ; Start of data area
+          MOVE.L    (A1)+,D7        ; End of data area
+          MOVE.L    D6,D1           ; Copy start address
+          ANDI.L    #$00FFFFFF,D1   ; But assume 24 bit start addresses
+          CMPA.L    D1,A4           ; Check address is in this area
+          BCS.S     DATA_LOOP       ; Nope. Skip this one
+          CMPA.L    D7,A4           ; Check if we are still in the area
+          BHI.S     DATA_LOOP       ; Nope, skip this one
+          MOVE.B    #'D',(A0)+      ; It's data - buffer a 'D'
+          MOVE.B    #'C',(A0)+      ; And buffer a 'C'
+          ROL.L     #8,D6           ; Get the size byte from D6
+          MOVE.B    D6,D4           ; Copy to D4
           EXT.W     D4
-          ADDQ.W    #1,D4
-          JSR       GT_SIZE
-          TST.B     D6
-          BEQ.S     DATA_WORD
-          BGT.S     DATA_LONG
-          MOVEQ     #3,D5
-          BRA.S     BYTE_ENT
+          ADDQ.W    #1,D4           ; .B = 0, .W = 1, .L = 2
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          TST.B     D6              ; .B = $FF, .W = $00, .L = $01
+          BEQ.S     DATA_WORD       ; Do word sized data
+          BGT.S     DATA_LONG       ; Do long sized data
+          MOVEQ     #3,D5           ; Do byte sized data 4 at a time
+          BRA.S     BYTE_ENT        ; Don't need a comma, yet
 
 *--------------------------------------------------------------------
+* Buffers a comma prior to the next data byte.
 *--------------------------------------------------------------------
-BYTE_LOOP MOVE.B    #',',(A0)+
+BYTE_LOOP MOVE.B    #',',(A0)+      ; Buffer a comma
 
 *--------------------------------------------------------------------
+* Buffers out the DC.B data bytes. D5 controls how many will be done.
+* Also buffers each data byte to the buffer in A5 for later use. Data
+* bytes less than a space, or higher than CHR(127) (Copyright) are 
+* output in hex. Printable characters in between are output in ASCII.
 *--------------------------------------------------------------------
-BYTE_ENT  MOVE.B    (A4)+,D1
-          EXG       A0,A5
-          JSR       CN_HEXB
-          EXG       A0,A5
-          CMPI.B    #$20,D1
-          BCS.S     B_HEX
-          CMPI.B    #$7F,D1
-          BCC.S     B_HEX
-          MOVEQ     #$27,D0
-          MOVE.B    D0,(A0)+
-          MOVE.B    D1,(A0)+
-          MOVE.B    D0,(A0)+
+BYTE_ENT  MOVE.B    (A4)+,D1        ; Grab next byte
+          EXG       A0,A5           ; Use temp buffer at A5
+          JSR       CN_HEXB         ; Buffer a byte
+          EXG       A0,A5           ; Restore normal buffer
+          CMPI.B    #$20,D1         ; Lower than a space?
+          BCS.S     B_HEX           ; Yes, do it in hex
+          CMPI.B    #$7F,D1         ; Higher than $7F?
+          BCC.S     B_HEX           ; Yes, do it in hex too
+          MOVEQ     #$27,D0         ; Single quote
+          MOVE.B    D0,(A0)+        ; Buffer quote
+          MOVE.B    D1,(A0)+        ; Buffer character byte
+          MOVE.B    D0,(A0)+        ; Buffer quote
           BRA.S     B_NEXT
 
 *--------------------------------------------------------------------
+* Output a data byte in hex.
 *--------------------------------------------------------------------
-B_HEX     JSR       BTOHEX
+B_HEX     JSR       BTOHEX          ; Buffer '$' and a hex byte
 
 *--------------------------------------------------------------------
+* Are we done yet? D7 holds the last address of this data area. If we
+* have more to do, buffer a comma prior to the next data byte 
+* processing.
+* If A4 happens to be a label, then stop processing as we will need a
+* label in the output for it.
 *--------------------------------------------------------------------
-B_NEXT    CMPA.L    D7,A4
-          BHI.S     B_END
-          BSR       FIND_LBL
-          DBEQ      D5,BYTE_LOOP
-B_END     RTS
+B_NEXT    CMPA.L    D7,A4           ; Done yet?
+          BHI.S     B_END           ; Yes
+          BSR       FIND_LBL        ; Is A4 in the labels table?
+          DBEQ      D5,BYTE_LOOP    ; Go around, unless A4 is a label
+B_END     RTS                       ; Finished
 
 *--------------------------------------------------------------------
+* Buffers Word sized data. Loops around until D7 reaches the end 
+* address of this data area. Each word is read and buffered in hex.
+* If A4 happens to be a label, then stop processing as we will need a
+* label in the output for it.
 *--------------------------------------------------------------------
-DATA_WORD JSR       ADV_W
-          JSR       WTOHEX
-          CMPA.L    D7,A4
-          BHI.S     B_END
-          BSR       FIND_LBL
-          BEQ.S     B_END
-          MOVEQ     #0,D7
-          MOVE.B    #',',(A0)+
-          BRA.S     DATA_WORD
+DATA_WORD JSR       ADV_W           ; Grab next word of data
+          JSR       WTOHEX          ; Convert to hex & buffer
+          CMPA.L    D7,A4           ; Done yet?
+          BHI.S     B_END           ; Yes, exit
+          BSR       FIND_LBL        ; Is A4 in the labels table?
+          BEQ.S     B_END           ; Yes, stop processing words
+          MOVEQ     #0,D7           ; No. Trashes end address ????
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          BRA.S     DATA_WORD       ; Do next word
 
 *--------------------------------------------------------------------
+* Buffers long sized data.
 *--------------------------------------------------------------------
-DATA_LONG JSR       ADV_L
-          JMP       LTOHEX
+DATA_LONG JSR       ADV_L           ; Grab the next long word of data
+          JMP       LTOHEX          ; Convert to hex and buffer
 
 *--------------------------------------------------------------------
 * Disassemble an instruction word.
@@ -779,83 +818,100 @@ DIS_INST  JSR       ADV_W           ; Get next opcode in D1, A4 += 2
 * well, $F instructions are for the co-processor or 68040 only. They
 * are ignored here.
 *--------------------------------------------------------------------
-LINETAB   DC.W      LINE0-LINETAB       ; ORI, Bxxx, MOVEP, ANDI, SUBI,
-;                                       ; ADDI, EORI, CMPI
-          DC.W      LINE1-LINETAB       ; MOVES (68010), MOVE.B
-          DC.W      LINE2-LINETAB       ; MOVE.L, MOVEA.L
-          DC.W      LINE3-LINETAB       ; MOVEA.W, MOVE.W
-          DC.W      LINE4-LINETAB       ; Everything not seen elsewhere!
-          DC.W      LINE5-LINETAB       ; ADDQ, Scc, DBcc, SUBQ
-          DC.W      LINE6-LINETAB       ; Bcc, BRA, BSR
-          DC.W      LINE7-LINETAB       ; MOVEQ
-          DC.W      LINE8-LINETAB       ; OR, DIVU, SBCD, DIVS
-          DC.W      LINE9-LINETAB       ; SUB, SUBA, SUBX
-          DC.W      ILL_INST-LINETAB    ; Nothing here
-          DC.W      LINEB-LINETAB       ; CMP, CMPA, CMPM, EOR
-          DC.W      LINEC-LINETAB       ; AND, MULU, ABCD, EXG, MULS
-          DC.W      LINED-LINETAB       ; ADD, ADDA, ADDX
-          DC.W      LINEE-LINETAB       ; Shift/rotate
-          DC.W      ILL_INST-LINETAB    ; Nothing here
+LINETAB   DC.W      LINE0-LINETAB   ; ORI, Bxxx, MOVEP, ANDI, SUBI,
+;                                   ; ADDI, EORI, CMPI
+          DC.W      LINE1-LINETAB   ; MOVES (68010), MOVE.B
+          DC.W      LINE2-LINETAB   ; MOVE.L, MOVEA.L
+          DC.W      LINE3-LINETAB   ; MOVEA.W, MOVE.W
+          DC.W      LINE4-LINETAB   ; Everything not seen elsewhere!
+          DC.W      LINE5-LINETAB   ; ADDQ, Scc, DBcc, SUBQ
+          DC.W      LINE6-LINETAB   ; Bcc, BRA, BSR
+          DC.W      LINE7-LINETAB   ; MOVEQ
+          DC.W      LINE8-LINETAB   ; OR, DIVU, SBCD, DIVS
+          DC.W      LINE9-LINETAB   ; SUB, SUBA, SUBX
+          DC.W      ILL_INST-LINETAB  ; Nothing here
+          DC.W      LINEB-LINETAB   ; CMP, CMPA, CMPM, EOR
+          DC.W      LINEC-LINETAB   ; AND, MULU, ABCD, EXG, MULS
+          DC.W      LINED-LINETAB   ; ADD, ADDA, ADDX
+          DC.W      LINEE-LINETAB   ; Shift/rotate
+          DC.W      ILL_INST-LINETAB  ; Nothing here
 
 *--------------------------------------------------------------------
 * LineA or any other illegal instruction.
 *--------------------------------------------------------------------
-ILL_INST  LEA       MN_ILL,A1           ; Illegal instruction message
-          JMP       COPY_LP             ; Copy to buffer
+ILL_INST  LEA       MN_ILL,A1       ; Illegal instruction message
+          JMP       COPY_LP         ; Copy to buffer
 
 *--------------------------------------------------------------------
 * Line0 - ORI, Bxxx, MOVEP, ANDI, SUBI, ADDI, EORI, CMPI.
 *--------------------------------------------------------------------
-LINE0     LEA       MN_LINE0,A1         ; Instruction list for Line0
-          MOVE.W    D7,D1               ; Opcode copied
-          ANDI.W    #$0E00,D1           ; Keep only bits 9-11 (Data register?)
-          ROL.W     #7,D1               ; Bits 9-11 into bits 0-2
-          BTST      #$08,D7             ; MOVEP?
-          BNE.S     TST_MOVEP           ; Yes, probably
-          CMPI.B    #$04,D1             ; Static Bxxx?
-          BEQ.S     BIT_MAN             ; Yes
-          CMPI.B    #$07,D1
-          BEQ.S     ILL_INST
-          CMPI.B    #$03,D4
-          BEQ.S     ILL_INST
-          MOVE.W    D1,D2
-          JSR       DIS_INDEX
-          MOVEQ     #$3F,D1
-          AND.B     D7,D1
-          CMPI.B    #$3C,D1
-          BNE.S     L0_IMM
-          SUBQ.B    #2,D2
-          BMI.S     L70672
-          SUBQ.B    #3,D2
-          BNE.S     L0_IMM
-L70672    LEA       OPR_FLD(A6),A0
-          JSR       EA_B
-          MOVE.B    #$2C,(A0)+
-          MOVE.W    D4,D1
-          LEA       MN_SRCCR,A1
-          JMP       DIS_INDEX
-
-L0_IMM    JSR       GT_SIZE
-          JSR       EA_B
-          MOVE.B    #',',(A0)+
-          JMP       EA_DALT
+LINE0     LEA       MN_LINE0,A1     ; Instruction list for Line0
+          MOVE.W    D7,D1           ; Opcode copied
+          ANDI.W    #$0E00,D1       ; Keep only bits 9-11
+          ROL.W     #7,D1           ; Bits 9-11 into bits 0-2
+          BTST      #$08,D7         ; MOVEP?
+          BNE.S     TST_MOVEP       ; Yes, probably
+          CMPI.B    #$04,D1         ; Static Bxxx?
+          BEQ.S     BIT_MAN         ; Yes
+          CMPI.B    #$07,D1         ; Can't possibly be 7
+          BEQ.S     ILL_INST        ; Illegal Instruction
+          CMPI.B    #$03,D4         ; Check size, 3 is bad
+          BEQ.S     ILL_INST        ; Illegal instruction
+          MOVE.W    D1,D2           ; Copy D1
 
 *--------------------------------------------------------------------
-* This should be MOVEP as it's the only line0 with bit 8 set.
+* The outliers are filtered out so D1 is one of the following:
+*
+* 0 = ORI, 1 = ANDI, 2 = SUBI, 3 = ADDI, 5 = EORI, 6 = CMPI
+*--------------------------------------------------------------------
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          MOVEQ     #$3F,D1         ; 0011 1111
+          AND.B     D7,D1           ; D1 = Effective Address
+          CMPI.B    #$3C,D1         ; ORI/ANDI/EORI CCR?
+          BNE.S     L0_IMM          ; No, skip
+          SUBQ.B    #2,D2           ; Look for CCR/SR opcodes
+          BMI.S     L70672          ; ORI or ANDI
+          SUBQ.B    #3,D2           ; Look again
+          BNE.S     L0_IMM          ; Not EORI
+
+*--------------------------------------------------------------------
+* Here we find ORI/ANDI/EORI CCR/SR instructions. Fill in the CCR or
+* SR part of the instruction.
+*--------------------------------------------------------------------
+L70672    LEA       OPR_FLD(A6),A0  ; Operand position in output buffer
+          JSR       EA_B            ; #immediate data
+          MOVE.B    #$2C,(A0)+      ; Buffer a comma
+          MOVE.W    D4,D1           ; Size is 00 or 01 for byte and word
+          LEA       MN_SRCCR,A1     ; CCR (byte) or SR (word)
+          JMP       DIS_INDEX       ; Buffer CCR or SR
+
+*--------------------------------------------------------------------
+* Here we find ORI/ANDI/SUBI/ADDI/EORI/CMPI instructions not affecting
+* the CCR or SR.
+*--------------------------------------------------------------------
+L0_IMM    JSR       GT_SIZE         ; Buffer the dot and the size
+          JSR       EA_B            ; #immediate data
+          MOVE.B    #',',(A0)+      ; Add a comma
+          JMP       EA_DALT         ; Data alterable address
+
+*--------------------------------------------------------------------
+* This should be MOVEP as it's the only line0 with bit 8 set. If it
+* isn't MOVEP, then drop into a test for bit manipulation opcodes.
 *--------------------------------------------------------------------
 TST_MOVEP JSR       GET_MR          ; Get EA mode in D6, REG in D5
-          SUBQ.B    #1,D6
-          BEQ.S     D_MOVEP
+          SUBQ.B    #1,D6           ; MOVEP has mode 1
+          BEQ.S     D_MOVEP         ; Definitely MOVEP
 
 *--------------------------------------------------------------------
 * Dynamic & Static bit manipulations here.
-* Bits 6-7 hold the actual operation.
-* Bit 8 says Dynamic or Static.
+* Bits 6-7 hold the actual operation. 00 = BTST, 01 = BCHG, 10 = BCLR,
+* 11 = BSET.
+* Bit 8 says Dynamic (1) or Static (0).
 *--------------------------------------------------------------------
-BIT_MAN   MOVE.W    D4,D1           ; Get the type from D4
+BIT_MAN   MOVE.W    D4,D1           ; Get the size (= type) from D4
           LEA       MN_BIT,A1       ; Start of instructions buffer
-          JSR       DIS_INDEX       ; ???? -> TODO
-          LEA       OPR_FLD(A6),A0  ; Output buffer
+          JSR       DIS_INDEX       ; Buffer D1th Instruction
+          LEA       OPR_FLD(A6),A0  ; Output buffer operand position
           BTST      #8,D7           ; Static?
           BEQ.S     BIT_IMM         ; Yes, skip
 
@@ -876,40 +932,42 @@ BIT_IMM   MOVE.B    #'#',(A0)+      ; Buffer the hash
 * Dynamic & Staic Bxxx join up here again.
 *--------------------------------------------------------------------
 L0_COMMA  MOVE.B    #',',(A0)+      ; Buffer the comma
-          TST.B     D4              ; 
-          BEQ       EA_DATA
-          JMP       EA_DALT
+          TST.B     D4              ; 00 = BTST
+          BEQ       EA_DATA         ; Data register only
+          JMP       EA_DALT         ; The rest are data alterable
 
 *--------------------------------------------------------------------
+* MOVEP only. Memory to register.                      MOVEP d(Ay),Dx
 *--------------------------------------------------------------------
-D_MOVEP   LEA       MN_MOVEP,A1
-          JSR       COPY_LP
-          JSR       SIZE_WL
-          TST.B     D7
-          BMI.S     MOVEP_2
-          JSR       EA_5
-          MOVE.B    #',',(A0)+
-          JMP       SECNDREG
+D_MOVEP   LEA       MN_MOVEP,A1     ; 'MOVEP' opcode
+          JSR       COPY_LP         ; Buffer it
+          JSR       SIZE_WL         ; .W or .L into buffer
+          TST.B     D7              ; Bit 7 says direction
+          BMI.S     MOVEP_2         ; 1 = register to memory
+          JSR       EA_5            ; Do d(Ay) part of opcode
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       SECNDREG        ; Buffer the Dx part
 
 *--------------------------------------------------------------------
+* MOVEP only. Register to memory.                      MOVEP Dx,d(Ay)
 *--------------------------------------------------------------------
-MOVEP_2   JSR       SECNDREG
-          MOVE.B    #',',(A0)+
-          MOVEQ     #7,D5
-          AND.B     D7,D5
-          JMP       EA_5
+MOVEP_2   JSR       SECNDREG        ; Buffer the Dx part
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          MOVEQ     #7,D5           ; Mask for register
+          AND.B     D7,D5           ; D5 = register number
+          JMP       EA_5            ; Do d(Ay) part of opcode
 
 *--------------------------------------------------------------------
 * Line1 - MOVES (68010), MOVE.B.
 *--------------------------------------------------------------------
 LINE1     MOVEQ     #0,D4           ; Flag = byte size
-          BRA.S     D_MOVE
+          BRA.S     D_MOVE          ; Do all MOVEs
 
 *--------------------------------------------------------------------
 * Line2 - MOVEA.L, MOVE.L.
 *--------------------------------------------------------------------
 LINE2     MOVEQ     #2,D4           ; Flag = long size
-          BRA.S     D_MOVE
+          BRA.S     D_MOVE          ; Do all MOVEs
 
 *--------------------------------------------------------------------
 * Line3 - MOVEA.W, MOVE.W.
@@ -925,7 +983,7 @@ D_MOVE    LEA       MN_MOVE,A1      ; 'MOVE'
           TST.B     D4              ; Check size flag
           BNE.S     MOVE_WL         ; Not byte, skip
           JSR       EA_DATA         ; Get EA mode and register
-          BRA.S     MOVE_2
+          BRA.S     MOVE_2          ; Skip
 
 *--------------------------------------------------------------------
 * Word and long MOVEs come here.
@@ -944,507 +1002,813 @@ MOVE_2    MOVE.B    #',',(A0)+      ; Buffer a comma
 *         LINK, UNLK, MOVE (USP), RESET, NOP, STOP, RTE, RTD (68010),
 *         RTS, TRAPV, RTR, MOVEC (68010), JSR, JMP.
 *--------------------------------------------------------------------
-LINE4     BTST      #8,D7
-          BEQ.S     L4_MISC
-          TST.B     D7
-          BPL       ILL_INST
-          MOVEQ     #1,D1
-          AND.B     D4,D1
-          LEA       MN_CHKLEA,A1
-          JSR       DIS_INDEX
-          LEA       OPR_FLD(A6),A0
-          LSR.B     #1,D4
-          BCS.S     D_LEA
+LINE4     BTST      #8,D7           ; Try to identify the opcode
+          BEQ.S     L4_MISC         ; CHK and LEA have a 1, only
+
+*--------------------------------------------------------------------
+* Must be CHK or LEA here as bit 8 was set. 
+*--------------------------------------------------------------------
+          TST.B     D7              ; Check bit 7 of opcode
+          BPL       ILL_INST        ; Not set is illegal, skip
+          MOVEQ     #1,D1           ; Assume CHK first
+          AND.B     D4,D1           ; CHK = 2, LEA = 3, so then 0 & 1
+          LEA       MN_CHKLEA,A1    ; 'CHK', 'LEA'
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          LEA       OPR_FLD(A6),A0  ; Adjust output buffer pointer
+          LSR.B     #1,D4           ; LEA has bit 0 set
+          BCS.S     D_LEA           ; It's LEA
+
+*--------------------------------------------------------------------
+* We do CHK here.                                           CHK EA,Dn
+*--------------------------------------------------------------------
           JSR       EA_DATA         ; Get EA mode and register
-          MOVE.B    #',',(A0)+
-          JMP       SECNDREG
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       SECNDREG        ; Do the D register
 
-D_LEA     JSR       EA_CTRL
-          BRA       SECND_ADD
-L4_MISC   MOVE.W    D7,D1
-          ANDI.W    #$0600,D1
-          ROL.W     #7,D1
-          BTST      #11,D7
-          BNE.S     L4_2
-          CMPI.B    #3,D4
-          BEQ.S     MOVE_SR
-          LEA       MN_4_1,A1
-          JSR       DIS_INDEX
-          JSR       GT_SIZE
-          JMP       EA_DALT
+*--------------------------------------------------------------------
+* We do LEA here.                                           LEA EA,An
+*--------------------------------------------------------------------
+D_LEA     JSR       EA_CTRL         ; Do Control Mode EA
+          BRA       SECND_ADD       ; Do the A register 
 
-MOVE_SR   SUBQ.B    #1,D1
-          BEQ       ILL_INST
-          LEA       MN_MOVE,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          SUBQ.B    #1,D1
-          BPL.S     TO_SR
-          LEA       MN_SRCCR,A1
-          MOVEQ     #1,D1
-          JSR       DIS_INDEX
-          MOVE.B    #',',(A0)+
-          JMP       EA_DALT
+*--------------------------------------------------------------------
+* Attempt to do every type 4 that is not CHK or LEA here!
+*--------------------------------------------------------------------
+L4_MISC   MOVE.W    D7,D1           ; Copy the opcode word
+          ANDI.W    #$0600,D1       ; 0000 0110 0000 0000 = bits 9-10
+          ROL.W     #7,D1           ; Move to bits 0-1
+          BTST      #11,D7          ; Filter out some opcodes
+          BNE.S     L4_2            ; Skip
+          CMPI.B    #3,D4           ; Size = 3 = MOVE from SR/CCR
+          BEQ.S     MOVE_SR         ; MOVE SR/CCR - skip
 
-TO_SR     MOVE.W    D1,D4
+*--------------------------------------------------------------------
+* NEGX, CLR, NEG, NOT at this point.
+*--------------------------------------------------------------------
+          LEA       MN_4_1,A1       ; 'NEGX', 'CLR', 'NEG', 'NOT'
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          JMP       EA_DALT         ; Do the data alterable address
+
+*--------------------------------------------------------------------
+* MOVE to/from SR/CCR here.
+* D1 = 00 = MOVE from SR
+*      01 = MOVE from CCR (MC68010 only)
+*      10 = MOVE to CCR
+*      11 = MOVE to SR
+*--------------------------------------------------------------------
+MOVE_SR   SUBQ.B    #1,D1           ; MOVE from CCR?
+          BEQ       ILL_INST        ; Yes, illegal, MC68010 only
+          LEA       MN_MOVE,A1      ; 'MOVE'
+          JSR       COPY_LP         ; Buffer the opcode
+          LEA       OPR_FLD(A6),A0  ; Adjust output buffer position
+          SUBQ.B    #1,D1           ; Move to SR/CCR?
+          BPL.S     TO_SR           ; Yes, skip
+
+*--------------------------------------------------------------------
+* MOVE from SR only here.
+*--------------------------------------------------------------------
+          LEA       MN_SRCCR,A1     ; 'CCR', 'SR'
+          MOVEQ     #1,D1           ; Force SR
+          JSR       DIS_INDEX       ; Buffer instruction
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       EA_DALT         ; And the data alterable EA
+
+*--------------------------------------------------------------------
+* MOVE to SR/CCR here.
+*--------------------------------------------------------------------
+TO_SR     MOVE.W    D1,D4           ; Save D1 (0 = CCR, 1 = SR)
           JSR       EA_DATA         ; Get EA mode and register
-          MOVE.B    #',',(A0)+
-          MOVE.W    D4,D1
-          LEA       MN_SRCCR,A1
-          JMP       DIS_INDEX
+          MOVE.B    #',',(A0)+      ; Buffer the comma
+          MOVE.W    D4,D1           ; Restore D1
+          LEA       MN_SRCCR,A1     ; 'CCR', 'SR'
+          JMP       DIS_INDEX       ; Buffer D1th instruction
 
-L4_2      SUBQ.B    #1,D1
-          BEQ       D_TST
-          BGT       D_MOVEM2
-          SUBQ.B    #1,D4
-          BEQ.S     SWAP_PEA
-          BGT.S     EXT_MOVEM
-          LEA       MN_NBCD,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          JMP       EA_DALT
+*--------------------------------------------------------------------
+* Lots more mode 4's here.
+* D1 = bits 9-10 of the opcode moved into bits 0-1.
+*--------------------------------------------------------------------
+L4_2      SUBQ.B    #1,D1           ; More filtering
+          BEQ       D_TST           ; TST, TAS or ILLEGAL maybe
+          BGT       D_MOVEM2        ; Others go here
+          SUBQ.B    #1,D4           ; Size 1 = SWAP or PEA
+          BEQ.S     SWAP_PEA        ; Skip to SWAP or PEA
+          BGT.S     EXT_MOVEM       ; EXT or MOVEM
 
-SWAP_PEA  MOVEQ     #$38,D0
-          AND.B     D7,D0
-          BNE.S     D_PEA
-          LEA       MN_SWAP,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          JMP       EA_DECODE
-D_PEA     LEA       MN_PEA,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          JMP       EA_CTRL
+*--------------------------------------------------------------------
+* NBCD here.
+*--------------------------------------------------------------------
+          LEA       MN_NBCD,A1      ; 'NBCD'
+          JSR       COPY_LP         ; Buffer the opcode
+          LEA       OPR_FLD(A6),A0  ; Update buffer position
+          JMP       EA_DALT         ; And do the data alterable EA
 
+*--------------------------------------------------------------------
+* SWAP or PEA arrive here.
+*--------------------------------------------------------------------
+SWAP_PEA  MOVEQ     #$38,D0         ; 0011 1000 = bits 3-5
+          AND.B     D7,D0           ; Mask off the EA mode
+          BNE.S     D_PEA           ; PEA cannot be mode 0
+
+*--------------------------------------------------------------------
+* SWAP here.
+*--------------------------------------------------------------------
+          LEA       MN_SWAP,A1      ; 'SWAP'
+          JSR       COPY_LP         ; Buffer it
+          LEA       OPR_FLD(A6),A0  ; Adjust buffer position
+          JMP       EA_DECODE       ; Decode EA
+
+*--------------------------------------------------------------------
+* PEA here.
+*--------------------------------------------------------------------
+D_PEA     LEA       MN_PEA,A1       ; 'PEA'
+          JSR       COPY_LP         ; Buffer it
+          LEA       OPR_FLD(A6),A0  ; Adjust buffer position
+          JMP       EA_CTRL         ; Decode control mode EA
+
+*--------------------------------------------------------------------
+* EXT or MOVEM here.
+*--------------------------------------------------------------------
 EXT_MOVEM JSR       GET_MR          ; Get EA mode in D6, REG in D5
-          LEA       MN_EXT,A1
-          TST.B     D6
-          BEQ.S     D_EXT
-          LEA       MN_MOVEM,A1
-D_EXT     JSR       COPY_LP
-          JSR       SIZE_WL
-          TST.B     D6
-          BEQ       EA_0
-          JSR       ADV_W
-          CMPI.B    #4,D6
-          BNE.S     D_MOVEM1
-          MOVE.W    D1,D2
-          MOVEQ     #15,D0
-REV_LOOP  LSR.W     #1,D2
+          LEA       MN_EXT,A1       ; 'EXT'
+          TST.B     D6              ; Test anyway mode 0 = EXT
+          BEQ.S     D_EXT           ; It's EXT
+
+*--------------------------------------------------------------------
+* MOVEM here.
+*--------------------------------------------------------------------
+          LEA       MN_MOVEM,A1     ; Must be 'MOVEM'
+
+*--------------------------------------------------------------------
+* EXT here.
+*--------------------------------------------------------------------
+D_EXT     JSR       COPY_LP         ; Buffer the opcode
+          JSR       SIZE_WL         ; Buffer the size
+          TST.B     D6              ; EXT?
+          BEQ       EA_0            ; Yes, do the Dn EA for EXT
+
+*--------------------------------------------------------------------
+* MOVEM continues here.                              MOVEM reglist,EA
+*--------------------------------------------------------------------
+          JSR       ADV_W           ; Get following word
+          CMPI.B    #4,D6           ; -(An)?
+          BNE.S     D_MOVEM1        ; No, skip
+
+*--------------------------------------------------------------------
+* MOVEM to/from -(An). We need to reverse the bits in the register
+* list word that follows the opcode for this variation.
+*--------------------------------------------------------------------
+          MOVE.W    D1,D2           ; Copy register list word
+          MOVEQ     #15,D0          ; 16 bits to reverse
+
+REV_LOOP  LSR.W     #1,D2           ; Reverse a single bit         
           ROXL.W    #1,D1
-REV_2     DBF       D0,REV_LOOP
-D_MOVEM1  BSR       REGLIST
-          MOVE.B    #',',(A0)+
-          CMPI.B    #2,D6
-          BEQ.S     D_MOVEM3
-          CMPI.B    #4,D6
-          BLT       EA_ERROR        ; Buffer a question mark for errors
-          CMPI.B    #8,D6
+
+REV_2     DBF       D0,REV_LOOP     ; Do the rest
+
+*--------------------------------------------------------------------
+* MOVEM all together again.
+*--------------------------------------------------------------------
+D_MOVEM1  BSR       REGLIST         ; Buffer the register list
+          MOVE.B    #',',(A0)+      ; And a comma
+          CMPI.B    #2,D6           ; (An) mode?
+          BEQ.S     D_MOVEM3        ; Yes, skip
+          CMPI.B    #4,D6           ; -(An) mode?
+          BLT       EA_ERROR        ; Illegal modes detected
+          CMPI.B    #8,D6           ; Mode 7.1 = Absolute Long
           BGT       EA_ERROR        ; Buffer a question mark for errors
-D_MOVEM3  JMP       EA_DECODE
 
-D_TST     LEA       MN_ILLEG,A1
-          CMPI.B    #$FC,D7
-          BEQ       COPY_LP
-          CMPI.B    #3,D4
-          BEQ.S     D_TAS
-          LEA       MN_TST,A1
-          JSR       COPY_LP
-          JSR       GT_SIZE
-          JMP       EA_DALT
+D_MOVEM3  JMP       EA_DECODE       ; Decode the EA
 
-D_TAS     LEA       MN_TAS,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          JMP       EA_DALT
+*--------------------------------------------------------------------
+* TST, TAS or ILLEGAL here.
+*--------------------------------------------------------------------
+D_TST     LEA       MN_ILLEG,A1     ; Try 'ILLEGAL'
+          CMPI.B    #$FC,D7         ; Check anyway
+          BEQ       COPY_LP         ; Good guess, ILLEGAL.
+          CMPI.B    #3,D4           ; Size 3 = TAS
+          BEQ.S     D_TAS           ; Skip to TAS
 
-D_MOVEM2  SUBQ.B    #1,D1
-          BNE       L4_E
-          TST.B     D7
-          BPL       ILL_INST
-          LEA       MN_MOVEM,A1
-          JSR       COPY_LP
-          JSR       SIZE_WL
-          JSR       ADV_W
-          MOVE.W    D1,D4
+*--------------------------------------------------------------------
+* TST here.
+*--------------------------------------------------------------------
+          LEA       MN_TST,A1       ; 'TST'
+          JSR       COPY_LP         ; Buffer the opcode
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          JMP       EA_DALT         ; Buffer the EA
+
+*--------------------------------------------------------------------
+* TAS here.
+*--------------------------------------------------------------------
+D_TAS     LEA       MN_TAS,A1       ; 'TAS'
+          JSR       COPY_LP         ; Buffer the opcode
+          LEA       OPR_FLD(A6),A0  ; Adjust buffer position
+          JMP       EA_DALT         ; Buffer the EA
+
+*--------------------------------------------------------------------
+* More MOVEM stuff here.                       MOVEM EA,register_list
+*--------------------------------------------------------------------
+D_MOVEM2  SUBQ.B    #1,D1           ; Are we doing MOVEM?
+          BNE       L4_E            ; It appears not, skip
+          TST.B     D7              ; Bit 7 should be set at least
+          BPL       ILL_INST        ; Unset, illegal line 4
+          LEA       MN_MOVEM,A1     ; 'MOVEM'
+          JSR       COPY_LP         ; Buffer opcode
+          JSR       SIZE_WL         ; Buffer size
+          JSR       ADV_W           ; Get register list word into D1
+          MOVE.W    D1,D4           ; Save register list for now
           JSR       GET_MR          ; Get EA mode in D6, REG in D5
-          CMPI.B    #2,D6
-          BLT.S     MOVEM_ER
-          CMPI.B    #4,D6
-          BEQ.S     MOVEM_ER
-          CMPI.B    #10,D6
-          BGT.S     MOVEM_ER
-          JSR       EA_DECODE
-          BRA.S     D_MOVEM4
+          CMPI.B    #2,D6           ; Mode 0 and 1 are illegal
+          BLT.S     MOVEM_ER        ; Mode 0 and 1
+          CMPI.B    #4,D6           ; -(An) mode?
+          BEQ.S     MOVEM_ER        ; Yes, not allowed either
+          CMPI.B    #10,D6          ; Immediate mode?
+          BGT.S     MOVEM_ER        ; That's illegal too
+          JSR       EA_DECODE       ; Decode EA
+          BRA.S     D_MOVEM4        ; Go do the register list    
+
+*--------------------------------------------------------------------
+* Illegal MOVEM addressing modes turn up here.
+*--------------------------------------------------------------------
 MOVEM_ER  JSR       EA_ERROR        ; Buffer a question mark for errors
-D_MOVEM4  MOVE.B    #',',(A0)+
-          MOVE.W    D4,D1
-REGLIST   MOVEQ     #0,D0
-          MOVEQ     #'D',D2
-          TST.B     D1
-          BEQ.S     RL_A
-          BSR.S     REGLIST1
-          TST.W     D1
-          BEQ.S     RL_END
-          MOVE.B    #'/',(A0)+
-RL_A      MOVEQ     #'A',D2
-          LSR.W     #8,D1
-REGLIST1  MOVEQ     #'0',D3
-RL_LP1    BTST      D0,D1
-          BNE.S     RL_SET
-          ADDQ.B    #1,D3
-          LSR.B     #1,D1
-          BNE.S     RL_LP1
-RL_END    RTS
 
-RL_SET    MOVE.B    D2,(A0)+
-          MOVE.B    D3,(A0)+
-          LSR.B     #1,D1
-          BTST      D0,D1
-          BEQ.S     RL_NEXT
-          MOVE.B    #'-',(A0)+
-RL_LP2    ADDQ.B    #1,D3
-          LSR.B     #1,D1
-          BTST      D0,D1
-          BNE.S     RL_LP2
-          MOVE.B    D2,(A0)+
-          MOVE.B    D3,(A0)+
-RL_NEXT   TST.B     D1
-          BEQ.S     RL_END
-          MOVE.B    #'/',(A0)+
-          ADDQ.B    #1,D3
-          BRA.S     RL_LP1
-L4_E      MOVE.B    D7,D1
-          LSR.B     #4,D1
-          SUBQ.B    #4,D1
-          BLT       ILL_INST
-          BNE.S     D_LINK
-          LEA       MN_TRAP,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          MOVE.B    #'#',(A0)+
-          MOVEQ     #$0F,D1
-          AND.B     D7,D1
-          JMP       BTOHEX
+*--------------------------------------------------------------------
+* Buffer the comma and the following register list
+*--------------------------------------------------------------------
+D_MOVEM4  MOVE.B    #',',(A0)+      ; Buffer a comma
+          MOVE.W    D4,D1           ; Restore register list
 
-D_LINK    SUBQ.B    #1,D1
-          BNE.S     MOVE_USP
-          LEA       MN_LINK,A1
-          BTST      #3,D7
-          BEQ.S     D_UNLK
-          LEA       MN_UNLK,A1
-D_UNLK    JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          BSR.S     ADDREG
-          BTST      #3,D7
-          BEQ.S     LINK_DSP
-          RTS
+*--------------------------------------------------------------------
+* Buffer the register list for a MOVEM opcode. D1.W is the list. D2.B
+* is the register type and A0 is the buffer address for output. D0 is
+* the bit counter and marks the bit we are testing in the list - it's
+* always bit zero! D2 is the register type and D3 is the current 
+* register number.
+*
+* Start with the Data registers.
+*--------------------------------------------------------------------
+REGLIST   MOVEQ     #0,D0           ; Bit counter
+          MOVEQ     #'D',D2         ; Start with Data registers
+          TST.B     D1              ; Low byte is the data register list
+          BEQ.S     RL_A            ; Nothing to do for data registers
+          BSR.S     REGLIST1        ; Do data registers
+          TST.W     D1              ; Are we done yet?
+          BEQ.S     RL_END          ; Yes, finished
+          MOVE.B    #'/',(A0)+      ; Buffer a '/' between D and A registers
 
-LINK_DSP  MOVE.B    #',',(A0)+
-          MOVE.B    #'#',(A0)+
-          JSR       ADV_W
-          JMP       WTOHEXS
 
-MOVE_USP  SUBQ.B    #1,D1
-          BNE.S     D_4E7X
-          LEA       MN_MOVE,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          BTST      #$03,D7
-          BNE.S     L709A2
-          BSR.S     ADDREG
-          MOVE.B    #$2C,(A0)+
-COPY_USP  LEA       MN_USP,A1
-          JMP       COPY_LP
+*--------------------------------------------------------------------
+* Address registers next.
+*--------------------------------------------------------------------
+RL_A      MOVEQ     #'A',D2         ; Doing A registers now
+          LSR.W     #8,D1           ; Shift the A byte into the low byte
 
-L709A2    BSR.S     COPY_USP
-          MOVE.B    #$2C,(A0)+
-ADDREG    MOVEQ     #$07,D5
-          AND.B     D7,D5
-          JMP       EA_1
+*--------------------------------------------------------------------
+* Process the D and the A registers in turn.
+*--------------------------------------------------------------------
+REGLIST1  MOVEQ     #'0',D3         ; Assume first register
 
-D_4E7X    TST.B     D7
-          BMI.S     L709DA
-          MOVEQ     #$0F,D1
-          AND.B     D7,D1
-          MOVE.B    D1,D2
-          CMPI.B    #$07,D2
-          BGT       ILL_INST
-          CMPI.B    #$04,D2
-          BEQ       ILL_INST
-          LEA       MN_4E7X,A1
-          JSR       DIS_INDEX
-          SUBQ.B    #2,D2
-          BNE.S     L709D8
-          LEA       OPR_FLD(A6),A0
-          MOVEQ     #$01,D4
-          JSR       EA_B
-L709D8    RTS
+RL_LP1    BTST      D0,D1           ; Test this bit (bit zero)
+          BNE.S     RL_SET          ; It is a register
+          ADDQ.B    #1,D3           ; Next register number
+          LSR.B     #1,D1           ; Shift next register bit into bit 0
+          BNE.S     RL_LP1          ; Test again
 
-L709DA    MOVEQ     #$01,D1
-          AND.B     D4,D1
-          LEA       MN_JSR,A1
-          JSR       DIS_INDEX
-          LEA       OPR_FLD(A6),A0
-          JMP       EA_CTRL
+RL_END    RTS                       ; We are done here
 
-QUICKDATA MOVE.B    #$23,(A0)+
-          MOVE.W    D7,D1
-          ANDI.W    #$0E00,D1
-          ROL.W     #7,D1
-          BNE.S     L709FE
-          MOVEQ     #$08,D1
-L709FE    ADDI.B    #$30,D1
-          MOVE.B    D1,(A0)+
-          MOVE.B    #$2C,(A0)+
-          RTS
+*--------------------------------------------------------------------
+* We have found a set bit in the register list. D2 is the register
+* type, D3 is the register number, in ASCII.
+* If the next bit is set too, we need a hyphen in the buffer
+*--------------------------------------------------------------------
+RL_SET    MOVE.B    D2,(A0)+        ; Buffer 'D' or 'A'
+          MOVE.B    D3,(A0)+        ; Buffer register number
+          LSR.B     #1,D1           ; Next register into bit zero
+          BTST      D0,D1           ; Is it set too?
+          BEQ.S     RL_NEXT         ; No, skip
+          MOVE.B    #'-',(A0)+      ; Yes, add a hyphen to the buffer
+
+*--------------------------------------------------------------------
+* Loop around until we find the first unset register bit.
+*--------------------------------------------------------------------
+RL_LP2    ADDQ.B    #1,D3           ; Next Register number
+          LSR.B     #1,D1           ; Next register bit into bit 0
+          BTST      D0,D1           ; Is it set?
+          BNE.S     RL_LP2          ; Yes, keep looking
+          MOVE.B    D2,(A0)+        ; Not set, buffer register type
+          MOVE.B    D3,(A0)+        ; And register number.
+
+*--------------------------------------------------------------------
+* No, or the end of, consecutive bits set. Buffer a '/' to separate
+* non consecutive register numbers. Then loop again if not finished.
+*--------------------------------------------------------------------
+RL_NEXT   TST.B     D1              ; Are we done yet?
+          BEQ.S     RL_END          ; Yes, exit
+          MOVE.B    #'/',(A0)+      ; No, add a '/' to the buffer
+          ADDQ.B    #1,D3           ; Next register number
+          BRA.S     RL_LP1          ; Look for the next set register bit
+
+*--------------------------------------------------------------------
+* More filtering of line 4 opcodes here.
+*--------------------------------------------------------------------
+L4_E      MOVE.B    D7,D1           ; Copy opcode word
+          LSR.B     #4,D1           ; Lose lowest 4 bits
+          SUBQ.B    #4,D1           ; Subtract
+          BLT       ILL_INST        ; -ve = Illegal line 4
+          BNE.S     D_LINK          ; Suspect LINK
+
+*--------------------------------------------------------------------
+* TRAP #n here.
+*--------------------------------------------------------------------
+          LEA       MN_TRAP,A1      ; 'TRAP'
+          JSR       COPY_LP         ; Buffer the opcode
+          LEA       OPR_FLD(A6),A0  ; Adjust buffer pointer
+          MOVE.B    #'#',(A0)+      ; Buffer the hash (#)
+          MOVEQ     #$0F,D1         ; Mask for vector
+          AND.B     D7,D1           ; D1 is the vector now
+          JMP       BTOHEX          ; Buffer the vector
+
+*--------------------------------------------------------------------
+* Testing for LINK or UNLK here.
+*--------------------------------------------------------------------
+D_LINK    SUBQ.B    #1,D1           ; LINK or UNLK?
+          BNE.S     MOVE_USP        ; No, skip
+
+*--------------------------------------------------------------------
+* LINK An,#d here.
+*--------------------------------------------------------------------
+          LEA       MN_LINK,A1      ; 'LINK' assumed
+          BTST      #3,D7           ; TEst anyway
+          BEQ.S     D_UNLK          ; 0 = UNLK, 1 = LINK
+          LEA       MN_UNLK,A1      ; 'UNLK'
+
+*--------------------------------------------------------------------
+* UNLK An here.
+*--------------------------------------------------------------------
+D_UNLK    JSR       COPY_LP         ; Buffer LINK or UNLK
+          LEA       OPR_FLD(A6),A0  ; Adjust buffer pointer
+          BSR.S     ADDREG          ; Buffer the A register
+          BTST      #3,D7           ; Link?
+          BEQ.S     LINK_DSP        ; Yes, do the rest of LINK
+          RTS                       ; UNLK - done
+
+*--------------------------------------------------------------------
+* Do the LINK displacement here.
+*--------------------------------------------------------------------
+LINK_DSP  MOVE.B    #',',(A0)+      ; Buffer a comma
+          MOVE.B    #'#',(A0)+      ; And a hash
+          JSR       ADV_W           ; Fetch the following word
+          JMP       WTOHEXS         ; Do the displacement
+
+*--------------------------------------------------------------------
+* Testing for MOVE to/from USP here.
+*--------------------------------------------------------------------
+MOVE_USP  SUBQ.B    #1,D1           ; MOVE USP?
+          BNE.S     D_4E7X          ; No, try the $4E7x opcodes next
+          LEA       MN_MOVE,A1      ; 'MOVE'
+          JSR       COPY_LP         ; Buffer the opcode
+          LEA       OPR_FLD(A6),A0  ; Adjust the pointer
+          BTST      #$03,D7         ; Direction bit
+          BNE.S     L709A2          ; Skip if MOVE from USP
+
+*--------------------------------------------------------------------
+* MOVE An,USP here.
+*--------------------------------------------------------------------
+          BSR.S     ADDREG          ; Buffer the address register    
+          MOVE.B    #$2C,(A0)+      ; Buffer a comma
+
+*--------------------------------------------------------------------
+* Buffer 'USP' and exit if we have done MOVE An,USP.
+*--------------------------------------------------------------------
+COPY_USP  LEA       MN_USP,A1       ; 'USP'
+          JMP       COPY_LP         ; Buffer USP & exit for MOVE to USP
+
+*--------------------------------------------------------------------
+* MOVE USP,An here.
+*--------------------------------------------------------------------
+L709A2    BSR.S     COPY_USP        ; Buffer 'USP'
+          MOVE.B    #$2C,(A0)+      ; Buffer a comma
+
+*--------------------------------------------------------------------
+* Buffer address register.
+*--------------------------------------------------------------------
+ADDREG    MOVEQ     #$07,D5         ; Make for the register number
+          AND.B     D7,D5           ; D5 = register number
+          JMP       EA_1            ; Buffer it
+
+*--------------------------------------------------------------------
+* Decode opcodes $4E70 (RESET) through $4E77 (MOVEC - MC68010) here.
+*--------------------------------------------------------------------
+D_4E7X    TST.B     D7              ; Bit 7 set in opcode?
+          BMI.S     L709DA          ; Yes, skip to JSR or JMP opcodes
+          MOVEQ     #$0F,D1         ; Lower 4 bits kept
+          AND.B     D7,D1           ; Apply mask
+          MOVE.B    D1,D2           ; Copy result
+          CMPI.B    #$07,D2         ; MOVEC? MC68010 only
+          BGT       ILL_INST        ; Yes, illegal line 4 opcode
+          CMPI.B    #$04,D2         ; RTD? MC68010 only
+          BEQ       ILL_INST        ; Yes, illegal line 4 opcode
+
+*--------------------------------------------------------------------
+* RESET, NOP, STOP, RTE, RTS, TRAPV, RTR opcodes here.
+*--------------------------------------------------------------------
+          LEA       MN_4E7X,A1      ; RESET, NOP, STOP, RTE, RTS, TRAPV, RTR
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          SUBQ.B    #2,D2           ; Only STOP has an operand
+          BNE.S     L709D8          ; Not STOP, skip
+          LEA       OPR_FLD(A6),A0  ; Adjust buffer pointer
+          MOVEQ     #$01,D4         ; Force word size
+          JSR       EA_B            ; Immediate Data EA
+
+L709D8    RTS                       ; Done
+
+*--------------------------------------------------------------------
+* JSR and JMP here.
+*--------------------------------------------------------------------
+L709DA    MOVEQ     #$01,D1         ; Mask for size
+          AND.B     D4,D1           ; Bit 6 determines opcode
+          LEA       MN_JSR,A1       ; 0 = 'JSR', 1 = 'JMP'
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          LEA       OPR_FLD(A6),A0  ; Adjust buffer pointer
+          JMP       EA_CTRL         ; Buffer control mode EA
+
+*--------------------------------------------------------------------
+* Deal with the data part for the various xxxQ instructions.
+*--------------------------------------------------------------------
+QUICKDATA MOVE.B    #$23,(A0)+      ; Hash (#) character
+          MOVE.W    D7,D1           ; Copy opcode word
+          ANDI.W    #$0E00,D1       ; Mask off bits 9-11
+          ROL.W     #7,D1           ; Rotate into bits 0-2
+          BNE.S     L709FE          ; Data is 1 to 7 only
+          MOVEQ     #$08,D1         ; Data is zero, so actually 8
+
+L709FE    ADDI.B    #$30,D1         ; ASCIIfy the data
+          MOVE.B    D1,(A0)+        ; Buffer the data
+          MOVE.B    #$2C,(A0)+      ; Buffer a comma
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Line5 - ADDQ, Scc, DBcc, SUBQ.
 *--------------------------------------------------------------------
-LINE5     CMPI.B    #$03,D4
-          BEQ.S     L70A2C
-          LEA       MN_ADDQ,A1
-          BTST      #$08,D7
-          BEQ.S     L70A1E
-          LEA       MN_SUBQ,A1
-L70A1E    JSR       COPY_LP
-          JSR       GT_SIZE
-          BSR.S     QUICKDATA
-          JMP       EA_ALT
+LINE5     CMPI.B    #$03,D4         ; If size = 3, then Scc or DBcc
+          BEQ.S     L70A2C          ; Scc and DBcc so skip
+          LEA       MN_ADDQ,A1      ; 'ADDQ' is assumed
+          BTST      #$08,D7         ; Test anyway
+          BEQ.S     L70A1E          ; Correct assumption, it's ADDQ
+          LEA       MN_SUBQ,A1      ; 'SUBQ' after all
 
-L70A2C    LEA       CONDTAB1,A1
+L70A1E    JSR       COPY_LP         ; Buffer the opcode
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          BSR.S     QUICKDATA       ; Buffer the 'Quick' data value
+          JMP       EA_ALT          ; Do the alterable effaective address
+
+*--------------------------------------------------------------------
+* Scc and DBcc arrive here.                             DBcc Dn,label
+* DBcc is dealt with here.
+*--------------------------------------------------------------------
+L70A2C    LEA       CONDTAB1,A1     ; Table of condition codes
           JSR       GET_MR          ; Get EA mode in D6, REG in D5
-          SUBQ.B    #1,D6
-          BNE.S     D_SCC
-          MOVE.B    #'D',(A0)+
-          MOVE.B    #'B',(A0)+
-          JSR       CONDITION
-          LEA       OPR_FLD(A6),A0
-          JSR       EA_0
-          MOVE.B    #',',(A0)+
-          JMP       EA_9
-
-D_SCC     MOVE.B    #'S',(A0)+
-          JSR       CONDITION
-          LEA       OPR_FLD(A6),A0
-          JMP       EA_DALT
+          SUBQ.B    #1,D6           ; Mode is an address register?
+          BNE.S     D_SCC           ; No, it's Scc then.
+          MOVE.B    #'D',(A0)+      ; DBcc, so buffer a 'D'
+          MOVE.B    #'B',(A0)+      ; And a 'C'
+          JSR       CONDITION       ; Then the cc part
+          LEA       OPR_FLD(A6),A0  ; Position in the output buffer
+          JSR       EA_0            ; Do the data register
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       EA_9            ; do nn(PC) finally
 
 *--------------------------------------------------------------------
-* Line6 - Bcc, BRA, BSR.
+* Must be Scc.                                  Scc effective_address
 *--------------------------------------------------------------------
-LINE6     MOVE.B    #'B',(A0)+
-          LEA       CONDTAB2,A1
-          JSR       CONDITION
-          MOVE.B    D7,D1
-          BEQ.S     BR_LONG
-          MOVE.B    #'.',(A0)+
-          MOVE.B    #'S',(A0)+
-          LEA       OPR_FLD(A6),A0
-          MOVE.L    A4,A1
-          EXT.W     D1
-          JMP       EA_9A
+D_SCC     MOVE.B    #'S',(A0)+      ; Buffer the 'S'
+          JSR       CONDITION       ; Buffer the condition
+          LEA       OPR_FLD(A6),A0  ; Position the output buffer
+          JMP       EA_DALT         ; Do the effective address
 
-BR_LONG   LEA       OPR_FLD(A6),A0
-          JMP       EA_9
+*--------------------------------------------------------------------
+* Line6 - Bcc, BRA, BSR.                                  Bxx.S label
+* Short branches are dealt with first.
+*--------------------------------------------------------------------
+LINE6     MOVE.B    #'B',(A0)+      ; Buffer the 'B'
+          LEA       CONDTAB2,A1     ; Condition code table
+          JSR       CONDITION       ; Buffer the condition
+          MOVE.B    D7,D1           ; Copy opcode word
+          BEQ.S     BR_LONG         ; Zero = not short branch
+          MOVE.B    #'.',(A0)+      ; Short branch, buffer the dot
+          MOVE.B    #'S',(A0)+      ; And the 'S'
+          LEA       OPR_FLD(A6),A0  ; Position the output buffer
+          MOVE.L    A4,A1           ; Current address
+          EXT.W     D1              ; Extend the displacement to word
+          JMP       EA_9A           ; Work out short branch destination
+
+*--------------------------------------------------------------------
+* Bcc, BRA, BSR                                             Bxx label
+*--------------------------------------------------------------------
+BR_LONG   LEA       OPR_FLD(A6),A0  ; Position the output buffer
+          JMP       EA_9            ; Work out nn(PC)
 
 *--------------------------------------------------------------------
 * Line7 - MOVEQ.
 *--------------------------------------------------------------------
-LINE7     BTST      #8,D7
-          BNE       ILL_INST
-          LEA       MN_MOVEQ,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          MOVE.B    #'#',(A0)+
-          MOVE.B    D7,D1
-          JSR       BTOHEXS
-          MOVE.B    #',',(A0)+
-          JMP       SECNDREG
+LINE7     BTST      #8,D7           ; Bit 8 must be a zero for MOVEQ
+          BNE       ILL_INST        ; No, skip, illegal opcode
+          LEA       MN_MOVEQ,A1     ; 'MOVEQ'
+          JSR       COPY_LP         ; Buffer it
+          LEA       OPR_FLD(A6),A0  ; Position the output buffer
+          MOVE.B    #'#',(A0)+      ; Buffer a hash (#)
+          MOVE.B    D7,D1           ; Copy opcode word
+          JSR       BTOHEXS         ; Buffer a byte of data
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       SECNDREG        ; Buffer the destination Dn
 
 *--------------------------------------------------------------------
 * LineC - AND, MULU, ABCD, EXG, MULS.
 *--------------------------------------------------------------------
-LINEC     LEA       MN_LINEC,A1
-          MOVE.W    D7,D1
-          ANDI.W    #$01F8,D1
-          LSR.W     #3,D1
-          SUBI.B    #$28,D1
-          BEQ.S     EXG_DX
-          SUBQ.B    #1,D1
-          BEQ.S     EXG_AX
-          SUBQ.B    #8,D1
-          BNE.S     D_L8
-EXG_DX    MOVEQ     #'D',D1
-          BRA.S     DO_EXG
-EXG_AX    MOVEQ     #'A',D1
-DO_EXG    LEA       MN_EXG,A1
-          JSR       COPY_LP
-          LEA       OPR_FLD(A6),A0
-          MOVE.B    D1,(A0)+
-          MOVE.W    D7,D0
-          ANDI.W    #$0E00,D0
-          ROL.W     #7,D0
-          ADDI.B    #'0',D0
-          MOVE.B    D0,(A0)+
-          MOVE.B    #',',(A0)+
-          JMP       EA_DECODE
+LINEC     LEA       MN_LINEC,A1     ; 'MULU', 'MULS', 'AND', 'ABCD'
+          MOVE.W    D7,D1           ; Copy opcode word
+          ANDI.W    #$01F8,D1       ; 0000 0001 1111 1000 = bits 3-8
+          LSR.W     #3,D1           ; Move to bits 0-5
+          SUBI.B    #$28,D1         ; 0010 1000 = EXG Dx,Dy
+          BEQ.S     EXG_DX          ; Skip
+          SUBQ.B    #1,D1           ; 0010 1001 = EXG Ax,Ay
+          BEQ.S     EXG_AX          ; Skip
+          SUBQ.B    #8,D1           ; 0011 0001 = EXG Dx,Ay
+          BNE.S     D_L8            ; But it's not, so skip.
+
+*--------------------------------------------------------------------
+* EXG Dx,Dy or EXG Dx,Ay here.
+*--------------------------------------------------------------------
+EXG_DX    MOVEQ     #'D',D1         ; First register is always 'D'
+          BRA.S     DO_EXG          
+
+*--------------------------------------------------------------------
+* EXG Ax,Ay here.
+*--------------------------------------------------------------------
+EXG_AX    MOVEQ     #'A',D1         ; First register is an 'A'
+
+*--------------------------------------------------------------------
+* EXG Dx,Dy, EXG Dx,Ay or EXG Dx,Ay here.
+*--------------------------------------------------------------------
+DO_EXG    LEA       MN_EXG,A1       ; 'EXG'
+          JSR       COPY_LP         ; Buffer the opcode
+          LEA       OPR_FLD(A6),A0  ; Adjust output buffer pointer
+          MOVE.B    D1,(A0)+        ; Buffer the first register 'D' or 'A'
+          MOVE.W    D7,D0           ; Copy opcode word
+          ANDI.W    #$0E00,D0       ; 0000 1110 0000 0000 = bits 9-11
+          ROL.W     #7,D0           ; Move to bits 0-2
+          ADDI.B    #'0',D0         ; ASCIIfy the register
+          MOVE.B    D0,(A0)+        ; Buffer the rugister
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       EA_DECODE       ; Decode the destination
 
 *--------------------------------------------------------------------
 * Line8 - OR, DIVU, SBCD, DIVS.
 *--------------------------------------------------------------------
-LINE8     LEA       MN_LINE8,A1
-D_L8      CMPI.B    #3,D4
-          BEQ.S     MUL_DIV
-          MOVEQ     #2,D1
-          BTST      #8,D7
-          BEQ.S     OR_AND
+LINE8     LEA       MN_LINE8,A1     ; 'DIVU', 'DIVS', 'OR', 'SBCD'
+D_L8      CMPI.B    #3,D4           ; Size 3 = DIVx
+          BEQ.S     MUL_DIV         ; Skip to DIVx
+          MOVEQ     #2,D1           ; Assume 'OR' now
+          BTST      #8,D7           ; Check anyway
+
+*--------------------------------------------------------------------
+* I'm not convinced yet. OR and SBCD come here. Bit 8 is only 0 (OR)
+* if it's OR EA,Dn if it's OR DN,EA then bit 8 is a 1. Bit 8 is a 1
+* always for SBCD and sometimes for an OR. Hmmm.  TODO => ????
+*--------------------------------------------------------------------
+          BEQ.S     OR_AND          ; It's OR if it's zero TODO => ????
           JSR       GET_MR          ; Get EA mode in D6, REG in D5
-          CMPI.B    #2,D6
+          CMPI.B    #2,D6           ; TODO => ????
           BGE       SUB_DX
-D_SBCD    MOVEQ     #3,D1
-          JSR       DIS_INDEX
-          LEA       OPR_FLD(A6),A0
-DX_OR_MEM LEA       EA_0,A2
-          TST.B     D6
-          BEQ.S     SBCD_DATA
-          LEA       EA_4,A2
-SBCD_DATA JSR       (A2)
-          MOVE.W    D7,D5
-          ANDI.W    #$0E00,D5
-          ROL.W     #7,D5
-          MOVE.B    #',',(A0)+
-          JMP       (A2)
 
-MUL_DIV   MOVEQ     #0,D1
-          MOVEQ     #1,D4
-          BTST      #8,D7
-          BEQ.S     MULU_DIVU
-          MOVEQ     #1,D1
-MULU_DIVU JSR       DIS_INDEX
-          LEA       OPR_FLD(A6),A0
-          BRA.S     OR_DIV
-OR_AND    JSR       DIS_INDEX
-          JSR       GT_SIZE
+*--------------------------------------------------------------------
+* Must be SBCD here.                                       
+*--------------------------------------------------------------------
+D_SBCD    MOVEQ     #3,D1           ; Must be 'SBCD'
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          LEA       OPR_FLD(A6),A0  ; Adjust output buffer pointer
+
+DX_OR_MEM LEA       EA_0,A2         ; Assume Dx,Dy
+          TST.B     D6              ; Check anyway
+          BEQ.S     SBCD_DATA       ; Mode 0 = SBCD Dx,Dy
+          LEA       EA_4,A2         ; Must be -(Ax),-(Ay)
+
+*--------------------------------------------------------------------
+* SBCD data here is either Dx,Dy or -(Ax),Ay). Other opcodes come 
+* here for the same reason.
+*--------------------------------------------------------------------
+SBCD_DATA JSR       (A2)            ; Do first operand
+          MOVE.W    D7,D5           ; Copy opcode word
+          ANDI.W    #$0E00,D5       ; 0000 1110 0000 0000 = bits 9-11
+          ROL.W     #7,D5           ; Shift to bits 0-2
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       (A2)            ; Do second operand
+
+*--------------------------------------------------------------------
+* MULU, MULS, DIVU, DIVS here.
+*--------------------------------------------------------------------
+MUL_DIV   MOVEQ     #0,D1           ; Assume MULU/DIVU
+          MOVEQ     #1,D4           ; Size is word, always
+          BTST      #8,D7           ; xxxU = 0, xxxS = 1
+          BEQ.S     MULU_DIVU       ; Must be Unsigned
+          MOVEQ     #1,D1           ; Assume MULS/DIVS
+
+*--------------------------------------------------------------------
+* Buffer the MULx or DIVx opcode.
+*--------------------------------------------------------------------
+MULU_DIVU JSR       DIS_INDEX       ; Buffer D1th instruction
+          LEA       OPR_FLD(A6),A0  ; Adjust output buffer position
+          BRA.S     OR_DIV          ; Skip
+
+*--------------------------------------------------------------------
+* OR and AND come here.
+*--------------------------------------------------------------------
+OR_AND    JSR       DIS_INDEX       ; Buffer D1th instruction
+          JSR       GT_SIZE         ; Buffer the dot and the size
+
+*--------------------------------------------------------------------
+* Common code for MULx, DIVx, OR, AND.
+*--------------------------------------------------------------------
 OR_DIV    JSR       EA_DATA         ; Get EA mode and register
-          MOVE.B    #',',(A0)+
-          JMP       SECNDREG
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          JMP       SECNDREG        ; Do the destination
 
 *--------------------------------------------------------------------
-* Line9 - SUB, SUBA, SUBX.
+* Line9 - SUBA, SUB, SUBX.
 *--------------------------------------------------------------------
-LINE9     LEA       MN_LINE9,A1
-          BRA.S     D_L9
+LINE9     LEA       MN_LINE9,A1     ; 'SUBA', 'SUB', 'SUBX'
+          BRA.S     D_L9            ; Skip to common code
 
 *--------------------------------------------------------------------
-* LineD - ADD, ADDA, ADDX.
+* LineD - ADDA, ADD, ADDX.
 *--------------------------------------------------------------------
-LINED     LEA       MN_LINED,A1
+LINED     LEA       MN_LINED,A1     ; 'ADDA', 'ADD', 'ADDX'
 
 *--------------------------------------------------------------------
 * Common code for:
 *
-* Line9 - SUB, SUBA, SUBX.
-* LineD - ADD, ADDA, ADDX.
+* Line9 - SUBA, SUB, SUBX.
+* LineD - ADDA, ADD, ADDX.
 *--------------------------------------------------------------------
-D_L9      CMPI.B    #3,D4
-          BEQ.S     D_SUBA
-          MOVEQ     #1,D1
-          BTST      #8,D7
-          BEQ.S     SUB_MEM
+D_L9      CMPI.B    #3,D4           ; Size 3 = SUBA or ADDA only
+          BEQ.S     D_SUBA          ; Yes, skip
+          MOVEQ     #1,D1           ; Assume SUB/ADD
+          BTST      #8,D7           ; Check anyway
+          BEQ.S     SUB_MEM         ; Good guess, 0 = SUB/ADD
+
+*--------------------------------------------------------------------
+* Must be SUBX or ADDX only here.                          SUBX Dy,Dx
+*                                                     SUBX -(Ay),-(Ax)
+*                                                          ADDX Dy,Dx
+*                                                     ADDX -(Ay),-(Ax)
+*--------------------------------------------------------------------
           JSR       GET_MR          ; Get EA mode in D6, REG in D5
-          CMP.B     D1,D6
-          BGT.S     SUB_DX
-          MOVEQ     #2,D1
-          JSR       DIS_INDEX
-          JSR       GT_SIZE
-          BRA.S     DX_OR_MEM
-D_SUBA    MOVEQ     #0,D1
-          JSR       DIS_INDEX
-          MOVEQ     #1,D4
-          BTST      #8,D7
-          BEQ.S     SUBA_SIZE
-          MOVEQ     #2,D4
-SUBA_SIZE JSR       GT_SIZE
-          JSR       EA_DECODE
-SECND_ADD MOVE.B    #',',(A0)+
-          MOVE.W    D7,D5
-          ANDI.W    #$0E00,D5
-          ROL.W     #7,D5
-          JMP       EA_1
+          CMP.B     D1,D6           ; SUBX/ADDX memory to memory
+          BGT.S     SUB_DX          ; Skip to SUBX/ADDX
+          MOVEQ     #2,D1           ; Must be SUBX/ADDX
+          JSR       DIS_INDEX       ; Buffer SUBX/ADDX instruction
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          BRA.S     DX_OR_MEM       ; Do the operands
 
-SUB_MEM   JSR       DIS_INDEX
-          JSR       GT_SIZE
-          JSR       EA_DECODE
-          MOVE.B    #',',(A0)+
-          JMP       SECNDREG
+*--------------------------------------------------------------------
+* Must be SUBA, ADDA or CMPA only here.                    SUBA EA,An
+*                                                          ADDA EA,An
+*                                                          CMPA EA,An
+*--------------------------------------------------------------------
+D_SUBA    MOVEQ     #0,D1           ; Get first opcode
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          MOVEQ     #1,D4           ; Assume .W
+          BTST      #8,D7           ; Test size bit, 0 = W, 1 = L
+          BEQ.S     SUBA_SIZE       ; Good guess, it's word
+          MOVEQ     #2,D4           ; Bad guess, it's long
 
-SUB_DX    LEA       EA_MALT,A2
-SUB_DX1   JSR       DIS_INDEX
-          JSR       GT_SIZE
-          JSR       SECNDREG
-          MOVE.B    #',',(A0)+
-          JMP       (A2)
+SUBA_SIZE JSR       GT_SIZE         ; Buffer the dot and the size
+          JSR       EA_DECODE       ; Do the Effective address
+
+SECND_ADD MOVE.B    #',',(A0)+      ; Buffer the comma
+          MOVE.W    D7,D5           ; Copy opcode word
+          ANDI.W    #$0E00,D5       ; Mask out register bits 9-11
+          ROL.W     #7,D5           ; Rotate into bits 0-2
+          JMP       EA_1            ; Buffer the address register
+
+*--------------------------------------------------------------------
+* Must be SUB, ADD or CMP here.                             SUB EA,Dn
+*                                                           SUB Dn,EA
+*                                                           ADD EA,Dn
+*                                                           ADD Dn,EA
+*                                                           CMP EA,Dn
+*--------------------------------------------------------------------
+SUB_MEM   JSR       DIS_INDEX       ; Buffer D1th instruction
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          JSR       EA_DECODE       ; Do the source operand
+          MOVE.B    #',',(A0)+      ; Then the comma is buffered
+          JMP       SECNDREG        ; Then the destination operand
+
+*--------------------------------------------------------------------
+* Must be SUBX or ADDX only here.                          SUBX Dy,Dx
+*                                                     SUBX -(Ay),-(Ax)
+*                                                          ADDX Dy,Dx
+*                                                     ADDX -(Ay),-(Ax)
+*--------------------------------------------------------------------
+SUB_DX    LEA       EA_MALT,A2      ; Do a memory alterable address
+
+SUB_DX1   JSR       DIS_INDEX       ; Buffer D1th instruction
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          JSR       SECNDREG        ; Do the source
+          MOVE.B    #',',(A0)+      ; Buffer the comma
+          JMP       (A2)            ; Do the destination 
 
 *--------------------------------------------------------------------
 * LineB - CMP, CMPA, EOR, CMPM.
 *--------------------------------------------------------------------
-LINEB     LEA       MN_LINEB,A1
-          CMPI.B    #3,D4
-          BEQ.S     D_SUBA
-          MOVEQ     #1,D1
-          BTST      #8,D7
-          BEQ.S     SUB_MEM
+LINEB     LEA       MN_LINEB,A1     ; 'CMPA', 'CMP', 'EOR', 'CMPM'
+          CMPI.B    #3,D4           ; Size 3 = CMPA
+          BEQ.S     D_SUBA          ; Common code for SUBA, ADDA, CMPA
+          MOVEQ     #1,D1           ; Assume 'CMP' now CMPA has gone
+          BTST      #8,D7           ; Only CMP has a zero here
+          BEQ.S     SUB_MEM         ; It's CMP, skip to common code
           JSR       GET_MR          ; Get EA mode in D6, REG in D5
-          MOVEQ     #2,D1
-          LEA       EA_DALT,A2
-          SUBQ.B    #1,D6
-          BNE.S     SUB_DX1
-          MOVEQ     #3,D1
-          JSR       DIS_INDEX
-          JSR       GT_SIZE
-          LEA       EA_3,A2
-          BRA       SBCD_DATA
+          MOVEQ     #2,D1           ; Assume EOR now CMPx have gone
+          LEA       EA_DALT,A2      ; Do a data alterable address, later
+          SUBQ.B    #1,D6           ; CMPM has mode 1
+          BNE.S     SUB_DX1         ; It's not CMPM, must be EOR
+          MOVEQ     #3,D1           ; Must be CMPM then
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          JSR       GT_SIZE         ; Buffer the dot and size
+          LEA       EA_3,A2         ; Destination decode routine
+          BRA       SBCD_DATA       ; Go do it
 
 *--------------------------------------------------------------------
 * LineE - Shift/Rotate instructions.
 *--------------------------------------------------------------------
-LINEE     LEA       MN_LINEE,A1
-          CMPI.B    #3,D4
-          BEQ.S     SH_MEM
-          MOVEQ     #$18,D1
-          AND.B     D7,D1
-          LSR.B     #3,D1
-          JSR       DIS_INDEX
-          BSR.S     DIRECTION
-          JSR       GT_SIZE
-          BTST      #5,D7
-          BEQ.S     SH_IMM
-          JSR       SECNDREG
-          MOVE.B    #',',(A0)+
-          BRA.S     SH_REG
-SH_IMM    JSR       QUICKDATA
-SH_REG    MOVE.B    #'D',(A0)+
-          MOVEQ     #7,D0
-          AND.B     D7,D0
-          ADDI.B    #'0',D0
-          MOVE.B    D0,(A0)+
-          RTS
+LINEE     LEA       MN_LINEE,A1     ; 'AS', 'LS', 'ROX', 'RO'
+          CMPI.B    #3,D4           ; Size 3 = Memory shifts
+          BEQ.S     SH_MEM          ; Do shift memory
+          MOVEQ     #$18,D1         ; 0001 1000
+          AND.B     D7,D1           ; Keep bits 3-4 of D1
+          LSR.B     #3,D1           ; Shift into bits 0-1
 
-SH_MEM    MOVE.W    D7,D1
-          ANDI.W    #$0600,D1
-          ROL.W     #7,D1
-          JSR       DIS_INDEX
-          BSR.S     DIRECTION
-          LEA       OPR_FLD(A6),A0
-          JMP       EA_MALT
+*--------------------------------------------------------------------
+* We know that D1 now has the correct opcode for a register shift:
+* 00 = AS, 01 = LS, 10 = ROX, 11 = RO.             
+*                                                           ASx Dx,Dy
+*                                                           ASx #d,Dx
+*                                                           LSx Dx,Dy
+*                                                           LSx #d,Dx
+*                                                          ROXx Dx,Dy
+*                                                          ROXx #d,Dx
+*                                                           ROx Dx,Dy
+*                                                           ROx #d,Dx
+*--------------------------------------------------------------------
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          BSR.S     DIRECTION       ; Buffer the direction
+          JSR       GT_SIZE         ; Buffer the dot and the size
+          BTST      #5,D7           ; Check method
+          BEQ.S     SH_IMM          ; Shift by immediate data
+          JSR       SECNDREG        ; Shifting by register
+          MOVE.B    #',',(A0)+      ; Buffer a comma
+          BRA.S     SH_REG          ; And the shifted register
 
-DIRECTION MOVEQ     #'R',D0
-          BTST      #8,D7
-          BEQ.S     DIR_MOVE
-          MOVEQ     #'L',D0
-DIR_MOVE  MOVE.B    D0,(A0)+
-          RTS
+*--------------------------------------------------------------------
+* We are doing a shift by immediate data to define the count.
+*--------------------------------------------------------------------
+SH_IMM    JSR       QUICKDATA       ; Buffer the 'Quick' data value
+
+*--------------------------------------------------------------------
+* Deal with the register being shifted here.
+*--------------------------------------------------------------------
+SH_REG    MOVE.B    #'D',(A0)+      ; Buffer a 'D' 
+          MOVEQ     #7,D0           ; Mask lower three bits
+          AND.B     D7,D0           ; Get the register number
+          ADDI.B    #'0',D0         ; ASCIIfy it
+          MOVE.B    D0,(A0)+        ; Buffer it
+          RTS                       ' Done
+
+*--------------------------------------------------------------------
+* Memory shifts are one bit only.
+*                                                              ASx EA
+*                                                              LSx EA
+*                                                             ROXx EA
+*                                                               RO EA
+*--------------------------------------------------------------------
+SH_MEM    MOVE.W    D7,D1           ; Copy opcode word
+          ANDI.W    #$0600,D1       ; 0000 0110 0000 0000 = bits 9-10
+          ROL.W     #7,D1           ; Bits 9-10 to bits 0-1
+          JSR       DIS_INDEX       ; Buffer D1th instruction
+          BSR.S     DIRECTION       ; Buffer the direction
+          LEA       OPR_FLD(A6),A0  ; Adjust output buffer position
+          JMP       EA_MALT         ; Buffer the effective address
+
+*--------------------------------------------------------------------
+* Adds the direction to the opcode in the buffer.
+*--------------------------------------------------------------------
+DIRECTION MOVEQ     #'R',D0         ; Assume right
+          BTST      #8,D7           ; Check
+          BEQ.S     DIR_MOVE        ; Correct guess, it's right
+          MOVEQ     #'L',D0         ; Wrong, it's left
+
+DIR_MOVE  MOVE.B    D0,(A0)+        ; Buffer the direction
+          RTS                       ; Done
 
 *--------------------------------------------------------------------
 * The following table of zero terminated opcodes is used to copy the

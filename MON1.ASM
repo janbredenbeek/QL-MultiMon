@@ -3034,6 +3034,9 @@ DIS_ALLOC MOVEQ     #-1,D2          ; Owned by this job
 *
 * Each start address has the high byte = $FF for byte sized data,
 * = $00 for word sized data or $01 for long sized data.  
+*
+* This assumes 24 bit addresses only. Might be a bad assumption these
+* days.
 *--------------------------------------------------------------------
 DATA_LOOP BSR       FIRSTLAST       ; Get start and end addresses
           OR.L      D4,D1           ; D4 = start, D1 & D5 = last
