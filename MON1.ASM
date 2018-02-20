@@ -3180,8 +3180,11 @@ EX2       MOVEQ     #1,D4           ; Open mode - old shared (OPEN_IN)
 *--------------------------------------------------------------------
           MOVE.L    A0,-(A7)        ; Save channel id for file
           MOVE.L    DISBUF(A6),D2   ; File size from header
+          MOVEQ     #0,D3           ; Assume dataspace of 0 bytes
+          SUBQ.B    #1,DISBUF+5(A6) ; Test for EXECable file
+          BNE.S     EX3             ; Skip if not (avoids junk in D3)
           MOVE.L    DISBUF+6(A6),D3 ; Data space from header
-          MOVEQ     #-1,D1          ; This job is the owner job
+EX3       MOVEQ     #-1,D1          ; This job is the owner job
           SUBA.L    A1,A1           ; Start address = start of code        
           MOVEQ     #MT_CJOB,D0
           TRAP      #1              ; Create a new job
@@ -3194,13 +3197,13 @@ EX2       MOVEQ     #1,D4           ; Open mode - old shared (OPEN_IN)
           MOVEQ     #FS_LOAD,D0     
           TRAP      #3              ; Load job into job space reserved
           TST.L     D0              ; Load ok?
-          BEQ.S     EX_ERR          ; No, bale out
-          MOVE.L    A0,-(A7)        ; Save A0
-          MOVEQ     #0,D3           ; Signal no error
+          BEQ.S     EX_ERR          ; Yes, skip
+          MOVEM.L   D0/A0,-(A7)     ; Load error, save D0/A0 (Bugfix!)
+          MOVEQ     #0,D3           ; Signal no error to return
           MOVE.L    D7,D1           ; Job id
           MOVEQ     #MT_FRJOB,D0
           TRAP      #1              ; Force kill the job
-          MOVE.L    (A7)+,A0        ; Restore A0
+          MOVEM.L   (A7)+,D0/A0     ; Restore D0/A0
 
 *--------------------------------------------------------------------
 * The filename passed is invalid for a job, or cannot be read etc.
@@ -3246,9 +3249,9 @@ COPY_REG  TRAP      #0              ; Supervisor mode
 *--------------------------------------------------------------------
 *** EXAM_REGS MOVE.L    A0,JBPNT(A6)    ; Current job or SuperBASIC
 EXAM_REGS BSR       FINDJB          ; Get ptr to job table entry A0
-          MOVE.L    (A0),A0         ; Base address of the job
-          LEA       $20(A0),A0      ; Storage in job, for D0
-          MOVE.L    A6,A1           ; A6 = Our dataspace = register storage
+*          MOVE.L    (A0),A0         ; Obsolete - pointer is now in A1
+          LEA       $20(A1),A0      ; Storage in job header, for D0
+          LEA       IM_D0(A6),A1    ; A6 = Our dataspace = register storage
           MOVEQ     #15,D0          ; 16 Registers to store
 
 *--------------------------------------------------------------------
@@ -3266,7 +3269,7 @@ COPY_R_LP MOVE.L    (A0)+,(A1)+     ; Copy a job's register to our storage
           MOVE.L    (A0),(A1)+      ; And the job's program counter
           MOVE.L    (A0)+,MEMPTR(A6)    ; The job's PC again.
           ADDQ.W    #2,A0           ; Skip unused word in job's header
-          MOVE.L    A0,(A1)+        ; Store the job's JB_END.
+          MOVE.L    A0,(A1)+        ; Store the job's JB_END in BP
 
 *--------------------------------------------------------------------
 * Force the job to use our exception vector table too, otherwise we
@@ -3281,6 +3284,12 @@ COPY_R_LP MOVE.L    (A0)+,(A1)+     ; Copy a job's register to our storage
           LEA       -$68(A0),A0     ; Start of job again
           LEA       EXTAB-$54(A6),A2    ; Vector table address
           MOVE.L    A2,$1C(A0)      ; JB_TRAPV - vector table
+
+*--------------------------------------------------------------------
+*** TODO: This check fails under SMSQ/E since SV.BASIC no longer
+***       points to header of job 0! Also avoid peeking into sysvars,
+***       specially using absolute addresses!
+
           CMPA.L    $28010,A0       ; SV_BASIC = Start of SuperBASIC area
           BEQ.S     ST_TP_1         ; Skip if SuperBASIC is the job
           ADDA.L    (A0),A0         ; JB_LEN = job length in header
@@ -3289,6 +3298,7 @@ COPY_R_LP MOVE.L    (A0)+,(A1)+     ; Copy a job's register to our storage
 *--------------------------------------------------------------------
 * We only come here if looking at SuperBASIC. We get the top end of 
 * SuperBASIC's alocated memory etc = SV_TRNSP.
+*** TODO: This test is no longer valid for SMSQ/E!
 *--------------------------------------------------------------------
 ST_TP_1   MOVE.L    $28014,A0       ; SV_TRNSP = Start of jobs in memory
 
@@ -3704,8 +3714,8 @@ HLP1_END  EQU       *
 * WILL CORRUPT THE CODE WHEN RUNNING ON A QL COMPUTER OR EMULATOR!!!!
 *--------------------------------------------------------------------
 HELPMSG2  DC.W      HLP2_END-*-2
-          DC.B      '                             QL MULTIMON V2.1',10
-          DC.B      '                       ',127,' 1986, 87 BY JAN BREDENBEEK',10,10
+          DC.B      '                             QL MULTIMON V3.0',10
+          DC.B      '                       ',127,' 1986-2018 BY JAN BREDENBEEK',10,10
           DC.B      'COMMANDS:',10,10
           DC.B      188,189,190,191,': CHANGE MEMORY POINTER            ALT-',188,189,190,191,': CHANGE REGISTER POINTER',10
           DC.B      'F2: MEMORY DUMP TO SCREEN              F3: DISASSEMBLE TO SCREEN',10
