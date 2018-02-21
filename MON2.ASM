@@ -1,24 +1,14 @@
-*MULTIMON
-*DISASSEMBLY ROUTINES
+* MULTIMON
+* QL MONITOR/DISASSEMBLER
+* DISASSEMBLY ROUTINES
+* Copyright (C) 1986-1987 by Jan Bredenbeek
+* Parts of the source code (C) 2017-2018 by Norman Dunbar and Jan Bredenbeek
+* Released under the GPL v3 license in 2017
+
+          INCLUDE   WIN1_QDOS_IN    QDOS Constants
+          INCLUDE   MULTIMON_INC    Macros and definitions
 
           SECTION   MON_CODE
-
-          XREF.S    BASE_PNT
-          XREF.S    TOP_PNT
-          XREF.S    DISBUFLEN
-          XREF.S    DISMOD
-          XREF.S    WRKSPOV
-          XREF.S    RELMOD
-          XREF.S    DATATBL
-          XREF.S    LBL_TBL
-          XREF.S    WRKSPTR
-          XREF.S    WRK_END
-          XREF.S    DISFRST
-          XREF.S    DISLAST
-          XREF.S    DISBUF
-          XREF.S    LBL_FLD
-          XREF.S    MNFIELD
-          XREF.S    OPR_FLD
 
           XDEF      DISASSEM
           XDEF      CN_ADDR
