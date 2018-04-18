@@ -1,2 +1,4 @@
 # QL-MultiMon
-A Machine code monitor and disassembler for the Sinclair QL, written in 1986-87. Manual updated February 2017. Source code included but needs a lot of cleaning up and commenting...
+A Machine code monitor and disassembler for the Sinclair QL, written in 1986-87. Manual updated February 2017.
+
+This is the original v2.1 release with extensive source code comments, thanks to Norman Dunbar. For the latest beta release, please select the v300_working branch.
