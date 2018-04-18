@@ -12,7 +12,6 @@
 
           XDEF      DISASSEM
           XDEF      CN_ADDR
-          XDEF      CN_ADDR8
           XDEF      CN_HEXB
           XDEF      CN_HEXL
           XDEF      ADD_WRK
@@ -66,54 +65,15 @@ LTOHEX    MOVE.B    #'$',(A0)+      ; Indicate Hexadecimal
 * for why this is, and how it might be updated to cover modern QL
 * memory sizes, emulators etc.
 *--------------------------------------------------------------------
-CN_ADDR   TST.B     RELMOD(A6)      ; Relative mode?
-          BEQ.S     CN_A_2          ; No, just do the Hexadecimal address
+CN_ADDR   MOVEQ     #5,D0           ; Only 5 digits permitted
+          TST.B     RELMOD(A6)      ; Relative mode?
+          BEQ.S     CN_HEX          ; No, just do the Hexadecimal address
           CMP.L     BASE_PNT(A6),D1 ; Yes, Adjust to a relative offset
-          BCS.S     CN_A_2          ; but only if within the range of
+          BCS.S     CN_HEX          ; but only if within the range of
           CMP.L     TOP_PNT(A6),D1  ; BASE_PNT to TOP_PNT.
-          BCC.S     CN_A_2
+          BCC.S     CN_HEX
           SUB.L     BASE_PNT(A6),D1 ; Make relative to BASE_PNT
-CN_A_2    MOVEQ     #4,D0           ; At most 4 leading zeroes
-          MOVE.L    D1,-(A7)        ; Save original D1
-*--------------------------------------------------------------------
-* OK, addresses should really be 8 hex digits these days. But as they
-* usually will fit into less than that, let's do it smart. We'll
-* buffer the least significant 4 hex digits anyway, but suppress any
-* leading zeroes beyond and replace them by spaces to keep the result
-* of fixed length.
-*--------------------------------------------------------------------
-CN_A_TST  ROL.L     #4,D1           ; Most significant 4 bits to 0-3
-          ANDI.B    #%1111,D1       ; Any nonzero bits?
-                                    ; (this doesn't destroy the MSW)
-          BNE.S     CN_A_RST        ; Yes, go buffer them as hex
-          SUBQ.W    #1,D0           ; One less hex digit needed
-          BNE       CN_A_TST        ; But do not discount more than 4
-CN_A_RST  MOVE.L    (A7)+,D1        ; Restore D1
-          ADDQ.W    #4,D0           ; At least 4 and at most 8 digits
-          BRA.S     CN_HEX          ; Print Hexadecimal digits
-
-*--------------------------------------------------------------------
-* Convert address to hex as above, but padded with leading spaces so
-* result is always 8 bytes
-*--------------------------------------------------------------------
-CN_ADDR8  BSR       CN_ADDR         ; Do the conversion
-          MOVEM.L   D0-D1,-(A7)     ; Save D0-D1
-          MOVE.W    D0,D1           ; D0 = # of digits converted
-          NEG.W     D1
-          ADDQ.W    #8,D1           ; Now calculate D1 = 8 - D0
-          BEQ.S     CN_AD8_R        ; If already zero, done
-          MOVE.L    A1,-(A7)        ; Save A1
-          LEA       (A0,D1.W),A1    ; Point A1 at end of buffer
-          MOVE.L    A1,-(A7)        ; .. which will be new A0 on exit
-CN_AD8_LP MOVE.B    -(A0),-(A1)     ; Shift all digits up
-          SUBQ.W    #1,D0
-          BNE       CN_AD8_LP
-CN_AD8_SP MOVE.B    #' ',-(A1)      ; and fill up with spaces
-          SUBQ.W    #1,D1
-          BNE       CN_AD8_SP
-          MOVEM.L   (A7)+,A0-A1     ; Pick up new A0; restore A1
-CN_AD8_R  MOVEM.L   (A7)+,D0-D1     ; and restore data register
-          RTS
+          BRA.S     CN_HEX          ; Print 5 Hexadecimal digits
 
 *--------------------------------------------------------------------
 * Positive byte to Hexadecimal.
@@ -705,7 +665,7 @@ CLRDISBUF MOVE.B    D1,(A1)+        ; Clear a byte
 * disassemble.
 *--------------------------------------------------------------------
           MOVE.L    A4,D1           ; Current instruction address
-          JSR       CN_ADDR8        ; Convert to 8 hex characters
+          JSR       CN_ADDR         ; Convert to 8 hex characters
           LEA       1(A0),A5        ; Temporary buffer? TODO => ????
           TST.B     DISMOD(A6)      ; -ve = 1 pass, +ve = 2 pass, 0 = pass 1 of 2
           BLE.S     TAB_MNEM        ; Single pass disassembly, no labels
