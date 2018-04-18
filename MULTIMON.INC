@@ -20,9 +20,9 @@ STRING$   MACRO A
 * Definitions
 *--------------------------------------------------------------------          
           
-version   SETSTR    3.00            Our new version!
+version   SETSTR    3.00b1          Our new version!
 
-DATASPACE EQU       1024            Stack space for the monitor
+DATASPACE EQU       1536            Stack space for the monitor
 LF        EQU       $0A             EOL character
 BKPTABSIZ EQU       10              Breakpoint table size
 NUMVECS   EQU       19              Number of exception vectors
@@ -49,8 +49,10 @@ IM_SSP    DS.L      1               Storage for Supervisor SP
 *--------------------------------------------------------------------
 EXTAB     DS.L      NUMVECS         Exception vector table
 EXTABEND  EQU       *               End of Exception vector table
+
 OWN_JB    DS.L      1               Pointer to our own entry in job table
 EXJB_ID   DS.L      1               ID of job to be Examined
+SYSVARS   DS.L      1               Address of QDOS/SMSQ's system vars
 
 *--------------------------------------------------------------------
 * Channel IDs for the various windows that we have open.
@@ -86,16 +88,16 @@ WRKSPOV   DS.B      1               We overflowed the workspace flag ($FF = Over
 * REGEND-REGMSG. Unfortunately this calculation cannot be done right
 * now so we have to specify it literally here...
 *--------------------------------------------------------------------
-REGBUF    DS.B      600             Allow for some overhead
+REGBUF    DS.B      736             Allow for some overhead
           DS.W      0               Next areas must start at word boundary
 
 *--------------------------------------------------------------------
 * The disassembly buffer is used for many things!
 * Format: (s = space)
-* Addr- -------Opcode------- Label- Mnemonic Operand(s)--------------
-*  (5) s        (20)        s (6)  s  (7)   s   (40 max)
+* --Addr-- -------Opcode------- Label- Mnemonic Operand(s)-----------
+*  (8)    s        (20)        s (6)  s  (7)   s   (40 max)
 *--------------------------------------------------------------------
-ADDRLEN   EQU       5               should be increased to 8!
+ADDRLEN   EQU       8               should be increased to 8!
 OPCODLEN  EQU       20              Hex of opcode+operands (max!)
 LABELLEN  EQU       ADDRLEN+1       Hex of address plus 'L'
 MNEMLEN   EQU       7               Length of mnemonic+size field
