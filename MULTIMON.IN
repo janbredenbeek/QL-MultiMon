@@ -1,10 +1,23 @@
 * MULTIMON
 * QL MONITOR/DISASSEMBLER
-* Copyright (C) 1986-1987 by Jan Bredenbeek
+* Copyright (C) 1986-2024 by Jan Bredenbeek
 * Parts of the source code (C) 2017-2018 by Norman Dunbar and Jan Bredenbeek
+*
 * Released under the GPL v3 license in 2017
-
-* This file should be INCLUDEd at the start of MON1.ASM and MON2.ASM
+* This program is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*
+* This file should be INCLUDEd at the start of all _asm files
 
 *--------------------------------------------------------------------
 * A Macro for generating QDOS strings
@@ -20,12 +33,46 @@ STRING$   MACRO A
 * Definitions
 *--------------------------------------------------------------------          
           
-version   SETSTR    3.00b1          Our new version!
+version   SETSTR    3.1             version number
 
-DATASPACE EQU       1536            Stack space for the monitor
+MMON.ID   EQU       $AA4D4F4E       ID for dataspace MULTIMON
+TOMB.ID   EQU       $AA544D42       ID for dataspace TOMB job
+DATASPACE EQU       2048            Stack space for the monitor
 LF        EQU       $0A             EOL character
 BKPTABSIZ EQU       10              Breakpoint table size
 NUMVECS   EQU       19              Number of exception vectors
+
+* QDOS/SMSQ constants
+
+SV_KEYQ   EQU       $4C             Current keyboard queue
+SV_JBMAX  EQU       $62             Highest job number in system
+SV_JBPNT  EQU       $64             Ptr to current job table entry
+SV_JBBAS  EQU       $68             Ptr to base of job table
+
+BV_RIP    EQU       $58             SBASIC Math stack pointer
+
+JB_HOLD   EQU       $0C             Location to be cleared on job release
+JB_TAG    EQU       $10             Job tag
+JB_PRIOR  EQU       $12             Job current priority
+JB_PRINC  EQU       $13             Job priority increment
+JB_STAT   EQU       $14             Job status (0 running, <>0 suspended)
+JB_WFLAG  EQU       $17             Set if another job is waiting for this job
+JB_WJOB   EQU       $18             ID of waiting job
+JB_TRAPV  EQU       $1C             Ptr to exception table in job header
+JB_D0     EQU       $20             Job header storage for D0
+JB_D1     EQU       $24             .. and so on
+JB_D2     EQU       $28
+JB_D3     EQU       $2C
+JB_A0     EQU       $40
+JB_A5     EQU       $54
+JB_A6     EQU       $58
+JB_A7     EQU       $5C
+JB_SR     EQU       $60
+JB_PC     EQU       $62
+JB_END    EQU       $68             End of job header
+SV_TRAPV  EQU       $50             System vector for exception table
+SV_TRAPO  EQU       $54             Offset from SV.TRAPV vector to
+*                                   exception table
 
 *--------------------------------------------------------------------
 * The following are offsets into the dataspace for various storage
@@ -35,7 +82,25 @@ NUMVECS   EQU       19              Number of exception vectors
 
           OFFSET    0
 
-IM_D0     DS.L      14              Storage for D0-A5
+MMON_ID   DS.L      1               Dataspace ID (either MMON.ID or TOMB.ID)
+OWN_JB    DS.L      1               Own job ID (either MULTIMON or TOMB job)
+
+EXTAB     DS.L      NUMVECS         Exception vector table
+EXTABEND  EQU       *               End of Exception vector table
+
+EXJB_ID   DS.L      1               ID of job to be Examined
+EXJB_TRP  DS.L      1               Job's original exception table vector
+EXJB_LEN  DS.L      1               Job's total length
+EXJB_DAT  DS.L      1               Job's data size
+; EXCPT_JB  DS.L      1               ID of job which caused last exception
+; EXCPT_MS  DS.L      1               Pointer to exception message
+SYSVARS   DS.L      1               Address of QDOS/SMSQ's system vars
+; EX_LEN    EQU       *               Total length of exception area
+
+* Register storage for monitored job
+
+IM_D0     DS.L      8               Storage for D0-D7
+IM_A0     DS.L      6               Storage for A0-A5
 IM_A6     DS.L      1               Storage for A6
 IM_USP    DS.L      1               Storage for User SP  
 IM_PC     DS.L      1               Storage for Program Counter
@@ -45,24 +110,17 @@ IM_SR     DS.W      1               Storage for Status Register
 IM_SSP    DS.L      1               Storage for Supervisor SP
 
 *--------------------------------------------------------------------
-* There's room in the exception table here for 19 exception vectors.
-*--------------------------------------------------------------------
-EXTAB     DS.L      NUMVECS         Exception vector table
-EXTABEND  EQU       *               End of Exception vector table
-
-OWN_JB    DS.L      1               Pointer to our own entry in job table
-EXJB_ID   DS.L      1               ID of job to be Examined
-SYSVARS   DS.L      1               Address of QDOS/SMSQ's system vars
-
-*--------------------------------------------------------------------
 * Channel IDs for the various windows that we have open.
 *--------------------------------------------------------------------
+GUARDWND  DS.L      1               Guardian window ID
 PROMPTWND DS.L      1               Prompt Windows ID
 REGWND    DS.L      1               Register Window ID
 MEMWND    DS.L      1               Memory Window ID
 CMDWND    DS.L      1               Command Window ID
 DISWND    DS.L      1               Disassembly Window ID
 AUXWND    DS.L      1               Auxiliary Window ID
+KEYQ      DS.L      1               Keyboard queue for our input
+
 MEMPTR    DS.L      1               Current memory pointer address
 REGPTR    DS.L      1               Current register pointer
 
@@ -83,6 +141,12 @@ DISMOD    DS.B      1               Disassembly mode: <0 single, 0 or 1 multi-pa
 OPCODEFLG DS.B      1               Flag - $FF = Suppress Opcodes in disassembly
 WRKSPOV   DS.B      1               We overflowed the workspace flag ($FF = Overflow)
 
+*----------------------------------
+* Buffer for examined job file name
+*----------------------------------
+          DS.W      0               Next area must start at word boundary
+EXJBFNAM  DS.B      36+8            len.w + devname + filename
+
 *--------------------------------------------------------------------
 * Buffer for the register window. It's size must be at least
 * REGEND-REGMSG. Unfortunately this calculation cannot be done right
@@ -97,7 +161,7 @@ REGBUF    DS.B      736             Allow for some overhead
 * --Addr-- -------Opcode------- Label- Mnemonic Operand(s)-----------
 *  (8)    s        (20)        s (6)  s  (7)   s   (40 max)
 *--------------------------------------------------------------------
-ADDRLEN   EQU       8               should be increased to 8!
+ADDRLEN   EQU       8               Address - up to 8 bytes
 OPCODLEN  EQU       20              Hex of opcode+operands (max!)
 LABELLEN  EQU       ADDRLEN+1       Hex of address plus 'L'
 MNEMLEN   EQU       7               Length of mnemonic+size field
@@ -110,3 +174,5 @@ OPR_FLD   DS.B      40              Start of operand field
 DISBUFLEN EQU       *-DISBUF        Size of disassembly buffer (bytes)
 
 HEXSTR    DS.B      41              Where the HEX codes go in the buffer
+
+DATA_END  EQU       *               End of data area

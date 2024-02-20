@@ -1,17 +1,31 @@
 * MULTIMON
 * QL MONITOR/DISASSEMBLER
-* Copyright (C) 1986-1987 by Jan Bredenbeek
+* Copyright (C) 1986-2024 by Jan Bredenbeek
 * Parts of the source code (C) 2017-2018 by Norman Dunbar and Jan Bredenbeek
 * Released under the GPL v3 license in 2017
+*
+* This program is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-          INCLUDE   WIN1_QDOS_IN    QDOS Constants
-          INCLUDE   MULTIMON_INC    Macros and definitions
+
+          INCLUDE   QDOS_IN    QDOS Constants
+          INCLUDE   MULTIMON_IN     Macros and definitions
 
 *--------------------------------------------------------------------
 * External definitions
 *--------------------------------------------------------------------
 
-* (we've moved the variable definitions to MULTIMON_INC)
+* (we've moved the variable definitions to MULTIMON_IN)
 
 *--------------------------------------------------------------------
 * External references
@@ -40,10 +54,14 @@ MON_BASE  BRA.S     START
 * Use the filler long word to hold the base address of the job's 
 * dataspace - if it was started by EXEC. Otherwise, it's random.
 * 20171213-JB: We need to get rid of this, it's dirty programming...
+* 20200423-JB: It's actually quite easy, since we can PEEK SV.TRAPV
+*   for the exception table which lies in our dataspace...
 *--------------------------------------------------------------------
 MON_VARS  DC.L      0               ; Storage for variables address
           DC.W      $4AFB           ; Job flag and name size
 MON_ID    STRING$   {'MULTIMON'}    ; Job name
+          DS.W      0
+MON_CODE  EQU       *-MON_BASE      ; code size for MON command
 
 *--------------------------------------------------------------------
 * Window definitions - moved here so they can be configured more
@@ -52,6 +70,11 @@ MON_ID    STRING$   {'MULTIMON'}    ; Job name
 * with parameters (for some reason, uQLx replaced them with default
 * values so all windows ended up overlapping each other!)
 *--------------------------------------------------------------------
+
+* Guardian window
+
+GUARDPAR  DC.B      0,0,0,7         ; use a guard window now!
+          DC.W      452,200,30,16
 
 *--------------------------------------------------------------------
 * This is the PROMPT window. (D7 = 5 in DO_OPEN)
@@ -133,14 +156,95 @@ AUX_PAR   DC.B      0,0,2,7         ; Border col+width, paper, ink
 * Call MT_INF to get the current jobid in D1.L. If this is zero, we
 * are in SuperBASIC so link MON in as a new procedure. Otherwise, we
 * have been EXEC'd and are running as a standalone job.
+* 20200424-JB: This was OK in 1986 when you could have only one job
+* running as SuperBASIC... Now with Minerva and SMSQ/E things are a
+* bit more complicated. Thanks to Marcel Kilgus for figuring out how
+* to distinguish between EXEC'ed and LRESPR'ed code...
 *--------------------------------------------------------------------
-START     MOVEQ     #MT_INF,D0      ; Get system information
+START     BTST      #6,(A6)         ; A6 points either to BRA.S at
+          BEQ.S     LRESPR          ; MON_BASE or start of SB sysvars
+                                    ; (in latter case, bit 6 isn't
+          CMPI.W    #$4AFB,6(A6)    ; likely to be set, but do an
+          BEQ.S     START2          ; extra check just to be sure.
+
+LRESPR    MOVEQ     #MT_INF,D0      ; Get system information
           TRAP      #1              
-          TST.L     D1              ; Check is SuperBASIC (Job zero)
-          BNE.S     START2          ; Not SuperBASIC (job zero)     
+          TST.L     D1              ; Check if main BASIC (Job zero)
+          BNE.S     ERR_NI          ; If daughter Basic, bail out
           LEA       PROCTAB,A1      ; Must be SuperBASIC - one proc
           MOVE.W    BP_INIT,A2      ; Link MON proc into SuperBASIC
-          JMP       (A2)            ; Do it & exit. 
+          JSR       (A2)            ; Do it
+;          MOVEQ     #EX_LEN,D1      ; Length of exception area
+;          MOVEQ     #-1,D2          ; Current job
+;          MOVEQ     #MT_ALCHP,D0    ; Allocate space in common heap
+;          TRAP      #1
+;          TST.L     D0              ; error?
+;          BNE.S     START_R         ; oops...
+;          LEA       EXTABEND(A0),A1 ; End of exception vector table
+;          BSR.S     SETVECS         ; Set vectors
+START_R   RTS
+ERR_NI    MOVEQ     #-19,D0         ; System extensions should NOT be
+          RTS                       ; LRESPRed in daughter S*BASICs!
+
+*--------------------------------------------------------------------
+* Fill in our own exception vector table, which we will also use for
+* any job that we decide to monitor.
+*** This routine MUST be called in supervisor mode! ***
+* Entry: D1.L job ID (tag may be zero for wildcard match)
+*--------------------------------------------------------------------
+
+SETVECS   BSR       FINDJB
+          BNE.S     SETVEC_R
+          MOVE.L    JB_TRAPV(A1),D0 ; get exception table pointer
+          MOVE.L    D0,A0
+          ADDA.W    #SV_TRAPO,A0    ; add table offset
+          LEA       EXTAB(A6),A1    ; our table          
+          CMPA.L    A0,A1           ; already using our table?
+          BEQ.S     SETVEC_R        ; yes, exit
+          MOVE.L    D0,EXJB_TRP(A6) ; save original JB_TRAPV
+          BEQ.S     SETVEC_1
+          MOVEQ     #NUMVECS-1,D0
+SETVEC_C  MOVE.L    (A0)+,(A1)+     ; copy existing vectors
+          DBF       D0,SETVEC_C
+
+; Now redirect any handlers with 'force' flag or which point to
+; a RTE instruction to our handlers
+
+SETVEC_1  LEA       EXTABLE(PC),A0  ; Our table of exception handlers
+          LEA       EXTABEND(A6),A1 ; End of exception table
+
+*--------------------------------------------------------------------
+* Fill in the exception table by reading the relative address of our
+* handlers and converting them to absolute addresses
+*--------------------------------------------------------------------          
+          MOVEQ     #NUMVECS-1,D0   ; Number of vectors - 1
+SETVEC_L  MOVE.L    (A0)+,D2        ; Offset in D2.W, flag in bit 16-31
+          BMI.S     SETVEC_F        ; if flag nonzero, force new handler
+          TST.L     EXJB_TRP(A6)    ; also force if job has no handlers
+          BEQ.S     SETVEC_F        ; at all
+          MOVE.L    -(A1),A2        ; get ptr to original handler
+          CMPI.W    #$4E73,(A2)     ; only an RTE instruction?
+          BNE.S     SETVEC_N        ; no, skip to next
+          ADDQ.L    #4,A1           ; else, balance for predecrement
+SETVEC_F  LEA       -4(A0,D2.W),A2  ; find address of handler
+          MOVE.L    A2,-(A1)        ; Set vector address
+SETVEC_N  DBF       D0,SETVEC_L     ; Loop for all vectors
+*--------------------------------------------------------------------
+* A1 now points to start of exception vector table!
+*--------------------------------------------------------------------          
+;          MOVEQ     #-1,D1          ; D1 should hold job ID now!
+          MOVEQ     #MT_TRAPV,D0     
+          TRAP      #1               ; Set the exception vectors   
+SETVEC_R  RTS
+
+* There is room here for enhancement. One thing I don't feel comfort-
+* able with is the fact that the exception vectors and handlers are
+* still within transient space which goes away when MULTIMON is quit!
+* They should really be in resident memory. Until I have worked out
+* a way to split this code off, please be very cautious with the use
+* of the E(xamine command on already running jobs (when using this
+* command to load and execute new jobs it's less of a problem since
+* these are likely to die along with MULTIMON when you quit).
 
 *--------------------------------------------------------------------
 * If we arrive here, we are running as a standalone job:
@@ -155,25 +259,26 @@ START     MOVEQ     #MT_INF,D0      ; Get system information
 * job, then save it in MON_VARS.
 *--------------------------------------------------------------------          
 START2    ADDA.L    A4,A6           ; A6 = Start of data space
-          LEA       MON_VARS,A1     ; ptr to variable storage
-          TST.L     (A1)            ; if zero, it's safe to use
-          BEQ.S     VARS_OK
-          LEA       VARSMSG,A1      ; But if nonzero, this copy is 
-          SUBA.L    A0,A0           ; already being used
-          MOVE.W    UT_MTEXT,A2     ; so print error message
-          JSR       (A2)
-          MOVEQ     #-1,D0          ; ... and exit 'not complete'
-          BRA       QMON_1
-VARS_OK   MOVE.L    A6,(A1)         ; store ptr to variable storage
+          MOVE.L    A6,A0
+          MOVE.W    #DATA_END/4,D0
+CLR_DATA  CLR.L     (A0)+           ; clear out whole data area first
+          DBF       D0,CLR_DATA
+          MOVE.L    #MMON.ID,MMON_ID(A6)
+          MOVEQ     #MT_INF,D0
+          TRAP      #1
           MOVE.L    D1,OWN_JB(A6)   ; set our own job ID
           MOVE.L    A0,SYSVARS(A6)  ; Address of QDOS/SMSQ's sysvars
+          BSR       SETVECS         ; set exception vectors
+          BSR       GET_TOMB        ; Tomb job found?
+          BEQ.S     SET_REGW        ; Yes, continue setup register window
+          BSR       GT_CREAT        ; else, create tomb job
 
 *--------------------------------------------------------------------
 * Set up the register window contents from a template.
 * We'll do it neatly this time so we'll copy the template to a buffer
 * in the data area rather than poke into the template itself!
 *--------------------------------------------------------------------
-          LEA       REGBUF(A6),A0   ; Point to register buffer
+SET_REGW  LEA       REGBUF(A6),A0   ; Point to register buffer
           LEA       REGMSG,A1       ; Our register window template
           MOVE.W    #REGEND-REGMSG,D1 ; length
 COPYRGDS  MOVE.B    (A1)+,(A0)+     ; copy over the template
@@ -185,6 +290,7 @@ COPYRGDS  MOVE.B    (A1)+,(A0)+     ; copy over the template
 *--------------------------------------------------------------------
           TRAP      #0              ; Enter supervisor mode
           MOVEQ     #0,D1           ; job 0 (SBASIC)
+          BSR       SETVECS
           JSR       EXAM_REGS       ; Copy registers etc to storage
           ANDI      #$DFFF,SR       ; Clear Supervisor bit
 
@@ -195,63 +301,14 @@ COPYRGDS  MOVE.B    (A1)+,(A0)+     ; copy over the template
           CLR.L     MEMPTR(A6)      ; Current memory address
           ST        RELMOD(A6)      ; $FF = Relative, $00 = Absolute
 
-*** OBSOLETE CODE ***          
-*          LEA       EXTABEND(A6),A7 ; Top of Exception vector table
-*          MOVEQ     #10,D0          ; Counter for 11 exception vectors
-
-*--------------------------------------------------------------------
-* Loop around for TRAP #15 to TRAP #5. Each of these points to the
-* EXBRKPNT code and will fire a breakpoint if executed.
-*--------------------------------------------------------------------
-*SETTRAPS  PEA       EXBRKPNT        ; Code for this trap's vector
-*          DBF       D0,SETTRAPS     ; Do all of #15 down to #5
-
-*--------------------------------------------------------------------
-* The rest of the exception vector table follows.
-*--------------------------------------------------------------------
-*          PEA       EXINTL7         ; Interrupt level 7
-*          PEA       EXTRACE         ; Trace exception
-*          PEA       EXPRIVV         ; Privilege violation
-*          PEA       EXTRAPV         ; TRAPV
-*          PEA       EXCHK           ; CHK
-*          PEA       EXDIVZER        ; Divide by zero exception
-*          PEA       EXILLINST       ; ILLEGAL instruction exception
-*          PEA       EXADDERR        ; Address error exception          
-*          MOVE.L    A7,A1           ; EXTAB = Exception vectors address
-*          LEA       DATASPACE(A6),A7 ; Reset stack pointer
-
-*--------------------------------------------------------------------
-* Fill in our own exception vector table, which we will also use for
-* any job that we decide to monitor.
-*--------------------------------------------------------------------
-
-          LEA       EXTABLE(PC),A0  ; Our table of exception handlers
-          LEA       EXTABEND(A6),A1 ; End of exception table
-
-*--------------------------------------------------------------------
-* Fill in the exception table by reading the relative address of our
-* handlers and converting them to absolute addresses
-*--------------------------------------------------------------------          
-          MOVEQ     #NUMVECS-1,D0   ; Number of vectors - 1
-SETVECS   MOVE.W    (A0)+,D1        ; Get offset in D1 (rel to PC)
-          LEA       -2(A0,D1.W),A2  ; Compensate for postincrement
-          MOVE.L    A2,-(A1)        ; Set vector address
-          DBF       D0,SETVECS      ; Loop for all vectors
-*--------------------------------------------------------------------
-* A1 now points to start of exception vector table!
-*--------------------------------------------------------------------          
-          MOVEQ     #-1,D1          ; For the current job
-          MOVEQ     #MT_TRAPV,D0     
-          TRAP      #1               ; Set the exception vectors                    
-          
 *--------------------------------------------------------------------
 * There are 6 separate windows to be opened at startup. D7 has the
 * count and A4 points at the first window definition, A5 points at 
 * the start of a consecutive storage area for the channel IDs. 
 *--------------------------------------------------------------------
-          MOVEQ     #5,D7           ; 6 windows to open
-          LEA       PRM_PAR,A4      ; PROMPT window definition
-          LEA       PROMPTWND(A6),A5    ; First window's storage area
+          MOVEQ     #6,D7           ; 6 windows to open
+          LEA       GUARDPAR,A4     ; PROMPT window definition
+          LEA       GUARDWND(A6),A5    ; First window's storage area
 
 *--------------------------------------------------------------------
 * A loop to open the 5 windows used by the monitor. 
@@ -272,13 +329,25 @@ DO_OPEN   JSR       (A2)            ; Open the window
           ADDA.W    #4+2*4,A4       ; The next window definition
           DBF       D7,OPEN_LP      ; Do the rest
 
+** EXPERIMENTAL **: set outline of guardian window for a nice shadow!
+
+IOP.OUTL  EQU       $7A
+
+          MOVE.L    #$00080006,D1
+          MOVEQ     #0,D2
+          MOVEQ     #-1,D3
+          MOVE.L    GUARDWND(A6),A0
+          LEA       GUARDPAR+4,A1
+          MOVEQ     #IOP.OUTL,D0
+*          TRAP      #3
+
 *--------------------------------------------------------------------
 * Clear out a couple of storage areas and then enter a loop to zero
 * out the entire breakpoint table - this is necessary as adding a new
 * breakpoint requires a slot value of zero.
 *--------------------------------------------------------------------
           CLR.W     REGPTR(A6)      ; No current register yet
-          CLR.W     HEXSTR(A6)      ; ???? -> TODO
+          CLR.W     HEXSTR(A6)      ; No search string yet
           LEA       BRKPTAB(A6),A0  ; Start of breakpoint table
           MOVEQ     #BKPTABSIZ-1,D0 ; Number of slots (minus 1)
 
@@ -302,14 +371,43 @@ BAS_ENT2  LEA       SIGNON,A1       ; Message to display on entry
 * an EXEC as we can at least clear it out when we are done as opposed
 * to having the code lying around in memory "forever".
 *--------------------------------------------------------------------
-BAS_ENT   MOVEQ     #0,D1           ; This job, SuperBASIC, owns it
-          LEA       MON_BASE,A1     ; Start address of the job's code
-          MOVEQ     #0,D2           ; No code space required
+BAS_ENT   MOVE.W    CA_GTSTR,A2     ; Get string parameter
+          JSR       (A2)
+          BNE.S     BAS_QUIT
+          MOVEQ     #0,D1           ; This job, SuperBASIC, owns it
+          SUBA.L    A1,A1           ; Start address of the job's code
+          MOVEQ     #MON_CODE,D2    ; code space required (few bytes!)
           MOVE.L    #DATASPACE,D3   ; Data space requirement
           MOVEQ     #MT_CJOB,D0     ; Create, don't activate, a new job
           TRAP      #1              ; returning D1 with the new job id
           TST.L     D0              
           BNE.S     BAS_QUIT        ; Bale out on errors creating job
+          MOVE.L    A0,A4           ; Save new job's base address
+          LEA       MON_BASE,A1     ; Base of job code
+          MOVE.W    #$4EF9,(A0)+    ; New job's code is just a JMP instruction
+          MOVE.L    A1,(A0)+        ; .. to start of resident code
+          MOVE.W    #$4AFB,(A0)+    ; .. followed by the magic marker
+          LEA       MON_ID,A1       ; .. and the MULTIMON name
+          MOVE.W    (A1)+,D0        ; length of name
+          MOVE.W    D0,(A0)+        ; store it
+BAS_LP1   MOVE.W    (A1)+,(A0)+     ; followed by the characters
+          SUBQ.W    #2,D0           ; .. two at a time
+          BGT       BAS_LP1
+          MOVE.L    BV_RIP(A6),A1   ; S*Basic math stack pointer
+          MOVEQ     #3,D0           ; length of string + 2 or 3 (evened up)
+          ADD.W     (A6,A1.L),D0    ; Add length of string
+          BCLR      #0,D0           ; .. and round up to next even number
+          ADD.L     D0,BV_RIP(A6)   ; tidy math stack
+          MOVE.L    JB_A7-JB_END(A4),A0 ; new job's stack pointer
+          SUBA.L    D0,A0           ; make room for string
+          MOVE.L    A0,JB_A7-JB_END(A4) ; store in job header
+          CLR.W     (A0)+           ; no channels to pass (yet)
+          MOVE.W    (A6,A1.L),D0    ; true length of string
+          MOVE.W    D0,(A0)+        ; store it
+BAS_LP2   ADDQ.L    #2,A1           ; step to next two chars
+          MOVE.W    (A6,A1.L),(A0)+ ; copy them onto the stack
+          SUBQ.W    #2,D0           ; .. two at a time
+          BGT       BAS_LP2
           MOVEQ     #32,D2          ; Priority = standard = 32
           MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #MT_ACTIV,D0    ; D1 = job id to activate
@@ -327,35 +425,92 @@ PROCTAB   DC.W      1               ; One PROCedure
           DS.W      0               ; No FuNctions (DC not DS!)
           DC.W      0,0,0           ; End of FNs, end of list.   
 
+*---------------------------------------------------------------------
+* Find Tomb job which will be used to store the exception vectors
+* and storage for registers saved by the scheduler after an exception.
+* Returns: D1 TOMB job ID, A1 start of exception vector table
+*---------------------------------------------------------------------
+
+GET_TOMB  MOVEQ     #0,D1           ; start with job 0
+          MOVEQ     #0,D2
+GT_LOOP   MOVEQ     #MT_JINF,D0     ; get job info
+          TRAP      #1
+          TST.L     D0              ; valid job ID?
+          BNE.S     GT_NOTF         ; no, exit
+          CMPI.W    #$60FE,(A0)     ; it must start with the BRA.S loop
+          BNE.S     GT_NEXT         ; if not, try next one
+          LEA       TOMB_DAT(A0),A1 ; point to assumed data space
+          CMPI.L    #TOMB.ID,(A1)+  ; check dataspace marker
+          BNE.S     GT_NEXT         ; if not good, loop back
+          MOVE.L    (A1)+,D1        ; set job ID
+          MOVEQ     #0,D0           ; exit with D0=0
+          RTS
+GT_NEXT   TST.L     D1              ; any jobs left?
+          BNE.S     GT_LOOP         ; yes, loop back
+GT_NOTF   MOVEQ     #-2,D0          ; not found; return ERR.NJ
+          RTS
+
+; This must be called when the TOMB job is to be created (from initialisation,
+; not from exception code!)
+
+GT_CREAT  MOVEQ     #0,D1           ; create with owner job 0 so it doesn't go
+          MOVE.L    D1,A1           ; away with MultiMon, also zero A1
+          MOVEQ     #TOMB_DAT,D2    ; required code space
+          MOVEQ     #EXTABEND,D3    ; only need exception table + marker
+          MOVEQ     #MT_CJOB,D0     ; create new job
+          TRAP      #1
+          TST.L     D0              ; OK?
+          BNE.S     GT_END          ; no, exit
+          MOVE.L    A0,A1           ; copy start pointer
+          LEA       TOMB_JOB,A2     ; code to copy
+          MOVEQ     #TOMB_DAT,D2    ; length
+GT_COPY   MOVE.W    (A2)+,(A1)+     ; copy job's code
+          SUBQ.W    #2,D2
+          BNE       GT_COPY
+          MOVE.L    #TOMB.ID,(A1)+  ; set dataspace ID
+          MOVE.L    D1,(A1)+        ; set job ID
+GT_END    TST.L     D0              ; set flags according to D0
+          RTS
+
+; The code for the TOMB job - only a looping instruction and identification
+
+TOMB_JOB  BRA.S     *
+          DC.L      0
+          DC.W      $4AFB
+          STRING$   {'-TOMB-'}
+TOMB_DAT  EQU       *-TOMB_JOB
+
 *--------------------------------------------------------------------
 * Table of our exception handlers. This holds relative addresses in
 * reverse order. The initialisation code will convert these to
-* absolute addresses to fill in the exception table
+* absolute addresses to fill in the exception table.
+* NB: a '0' flag means 'leave original handler alone if not pointing
+* to a RTE instruction', a '1' flag means force redirection.
 *--------------------------------------------------------------------
-EXTABLE   DC.W      EXBRKPNT-*      ; Trap #5 to #15 - Breakpoint
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXBRKPNT-*
-          DC.W      EXINTL7-*       ; Interrupt level 7
-          DC.W      EXTRACE-*       ; Trace exception
-          DC.W      EXPRIVV-*       ; Privilege violation
-          DC.W      EXTRAPV-*       ; TRAPV exception
-          DC.W      EXCHK-*         ; CHK exception
-          DC.W      EXDIVZER-*      ; Division by zero
-          DC.W      EXILLINST-*     ; Illegal instruction
-          DC.W      EXADDERR-*      ; Address error
+EXTABLE   DC.W      0,EXTRAP-*        ; Trap #5 to #15
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      0,EXTRAP-*
+          DC.W      -1,EXINTL7-*        ; Interrupt level 7
+          DC.W      -1,EXTRACE-*        ; Trace exception
+          DC.W      -1,EXPRIVV-*        ; Privilege violation
+          DC.W      0,EXTRAPV-*         ; TRAPV exception
+          DC.W      0,EXCHK-*           ; CHK exception
+          DC.W      0,EXDIVZER-*        ; Division by zero
+          DC.W      -1,EXBRKPNT-*       ; Illegal instruction (or breakpoint)
+          DC.W      -1,EXADDERR-*       ; Address error
           
 *--------------------------------------------------------------------
 * A small sign on message displayed at startup in the COMMAND WINDOW.
 *--------------------------------------------------------------------
-SIGNON    STRING$   {'MULTIMON V[version]',LF,127,' 1986-2018 Jan Bredenbeek',LF}
+SIGNON    STRING$   {'MULTIMON V[version]',LF,127,' 1986-2024 Jan Bredenbeek',LF}
 VARSMSG   STRING$   {'MULTIMON already active',LF}
 
 *--------------------------------------------------------------------
@@ -405,59 +560,231 @@ VARSMSG   STRING$   {'MULTIMON already active',LF}
 * 6(A7) = Program Counter.L
 * 4(A7) = Status Register.W
 * 0(A7) = Return address.L
+* The return from this routine is now different. The call to the routine should
+* now be followed by a QDOS string containing the message to be displayed when
+* an exception occurs (which may be null). The routine returns to the address
+* following the string (evened-up) with A1 pointing to the message, but only if
+* there is a MULTIMON job waiting for completion of an examined job!
+* In other cases, only a message is printed on channel #0 or #1. The routine
+* always suspends the current job, saves its registers and (in case MULTIMON is
+* waiting) releases MULTIMON with registers updated.
 *--------------------------------------------------------------------                            
 SAVREGS   MOVEM.L   D0-D2/A0/A5-A6,-(A7) ; Save some registers
           MOVEQ     #MT_INF,D0      ; find address of system vars
           TRAP      #1
-          MOVE.L    A0,A5           ; move to A5
-          MOVE.L    $64(A5),A6      ; ptr to current entry in SV.JBTAB
-          MOVE.L    (A6),A6         ; get job header's address
-          MOVEM.L   (A7)+,D0-D2/A0  ; restore registers
-          MOVEM.L   D0-D7/A0-A4,$20(A6) ; save them in job header
-          LEA       $54(A6),A6      ; Address of JB.A5
-          MOVE.L    (A7)+,(A6)+     ; Save value of A5
-          MOVE.L    (A7)+,(A6)+     ; Id. for A6
+          MOVE.L    A0,A6           ; move to A6
+          MOVE.L    SV_JBPNT(A6),A5 ; ptr to current entry in SV.JBTAB
+          MOVE.L    (A5),D0         ; get job header's address
+          BLE       SR_DUMP         ; it has gone already!
+          MOVE.L    D0,A5
+          MOVE.W    #-1,JB_STAT(A5) ; set job to 'suspended'
+          SF        JB_WFLAG(A5)    ; signal 'no job waiting for completion'
+          LEA       JB_D0(A5),A5    ; point to register storage
+          MOVE.L    (A7)+,(A5)+     ; save original D0
+          MOVE.L    (A7)+,(A5)+     ; ... and D1
+          MOVE.L    (A7)+,(A5)+     ; ... and D2
+          MOVE.L    (A7)+,A0        ; restore original A0
+          MOVEM.L   D3-D7/A0-A4,(A5) ; save regs in job header
+          LEA       JB_A5-JB_D3(A5),A5 ; point to JB_A5
+          MOVE.L    (A7)+,(A5)+     ; Save original A5
+          MOVE.L    (A7)+,(A5)+     ; Id. for A6
           MOVE      USP,A1          ; get USP = A7 of job
-          MOVE.L    A1,(A6)+        ; and store this
+          MOVE.L    A1,(A5)+        ; and store this
           MOVE.L    (A7)+,A4        ; Return address from SAVREGS
-          MOVE.W    (A7)+,(A6)+     ; Save SR
-          MOVE.L    (A7)+,(A6)+     ; and PC of job
-          MOVE.L    MON_VARS,A6     ; get ptr to our data storage
-          MOVEQ     #MT_INF,D0      ; get ID of offending job
-          TRAP      #1
-          JSR       EXAM_REGS       ; now copy regs to our storage
-          LEA       DATASPACE(A6),A0 ; end of our dataspace
-          MOVE      A0,USP          ; set our user stack pointer
-          MOVE.L    OWN_JB(A6),D1   ; get our own job ID
-***
-***       TODO:     Check and cleaning up needed here!
-***          
-          BSR.S     FINDJB          ; Get details of MultiMon job
-          MOVE.L    $64(A5),A2      ; Get ptr to current job header
-          CMPA.L    A0,A2           ; Are we examining ourself?
-          BEQ.S     GO_MON          ; yes
+          MOVE.W    (A7),(A5)+      ; Save SR
+          MOVE.L    2(A7),(A5)      ; and PC of job
 
-*--------------------------------------------------------------------
-* Suspend the monitored job, assuming it's not the monitor itself and
-* inddicate nobody is waiting for this job.
-*--------------------------------------------------------------------
-          MOVE.L    (A2),A2         ; Get base of job header
-          MOVE.W    #-1,$14(A2)     ; Set JB.STAT to 'suspended'
-          SF        $17(A2)         ; 
-GO_MON    MOVE.L    A0,$64(A5)      ; Now make MultiMon 'current job'
-          CLR.W     $14(A1)         ; Signal 'not suspended'
-          MOVE.L    $0C(A1),D0      ; Get address of flag of waiting job
-          BEQ.S     GO_MON1         ; ... if any ...
-          MOVE.L    D0,A0
-          SF        (A0)            ; Clear this location
-GO_MON1   MOVE      #$0000,SR       ; Go to user mode
-          JMP       (A4)            ; and jump to the saved return address
+; Now find out if Multimon was indeed active and waiting for this job
+; Note 1: There is no test if the job is really owned by MultiMon since we may
+; be monitoring jobs that already existed earlier, and jobs created by us may
+; have created child jobs themselves!
+; Note 2: D1 still holds the ID of the offending job
+
+          MOVEQ     #-1,D7          ; start at -1 so first becomes 0
+          MOVE.L    SV_JBBAS(A6),A0 ; start of job table
+SR_NEXT   ADDQ.W    #1,D7           ; next job id
+          CMP.W     SV_JBMAX(A6),D7 ; got all used entries?
+          BHI.S     SR_NOACT        ; yes
+          MOVE.L    (A0)+,D0        ; get pointer to this job's header
+          BLE.S     SR_NEXT         ; but if <=0, entry is unused
+          MOVE.L    D0,A3           ; pass to A3
+          CMPI.W    #-2,JB_STAT(A3) ; job waiting?
+          BNE       SR_NEXT         ; no, don't interrupt normal operation
+          MOVE.L    JB_A6(A3),A2    ; Get pointer to dataspace
+          CMPI.L    #MMON.ID,MMON_ID(A2) ; Test for magic string
+          BNE       SR_NEXT         ; Loop back unless found
+          SUBQ.L    #4,A0           ; step back in job table
+          MOVE.L    A0,SV_JBPNT(A6) ; make MULTIMON entry current job
+          MOVE.L    A2,A6           ; use A6 now for our data pointer
+          MOVE.L    JB_A7(A3),A0
+          MOVE      A0,USP          ; set our user stack pointer
+          JSR       EXAM_REGS       ; now copy from job header to our storage
+          MOVE.L    OWN_JB(A6),D1   ; get our own job ID
+
+*--------------------------------------------------------------------------
+* We're about to launch now from an exception. Rather than to brutally take
+* over control, we want to let the scheduler do some housekeeping first.
+* So just enter user mode and release ourself using MT.RELJB.
+*--------------------------------------------------------------------------
+
+          MOVE.W    #1,JB_STAT(A3)  ; .. in case the scheduler gets called
+                                    ; before we can release ourselves!
+          MOVE.W    JB_SR(A3),(A7)  ; our SR value to restore
+          LEA       GO_MON1,A0
+          MOVE.L    A0,2(A7)        ; Continue to GO_MON1
+          RTE                       ; Return from exception, removing possible
+                                    ; extra stacked information (68020+)
+
+GO_MON1   MOVEQ     #MT_RELJB,D0    ; Release ourselves but run scheduler first
+          TRAP      #1
+          MOVE.L    A4,A1           ; Copy return address containing exception
+          MOVE.W    (A4)+,D0        ; message to A1 and skip this over
+          ADDQ.W    #1,D0
+          BCLR      #0,D0
+          ADDA.W    D0,A4
+          JMP       (A4)            ; Now jump to the saved return address
+
+*------------------------------------------------------------------------------
+* When we've come here, things are a bit more complicated. There seems to be no
+* MultiMon job waiting for another one, so just print a message on channel 0 or
+* 1 and keep looping around. When we were in user mode this is just fine, since
+* we can launch MultiMon from any other job. But when in supervisor mode, this
+* isn't possible. Since such exceptions are usually caused by system extensions
+* such as device drivers, the system isn't very likely to be stable anymore, so
+* it's probably best to note the address of the exception and reboot the system
+* anyway...
+*------------------------------------------------------------------------------
+
+; entry point when offending job has gone
+
+SR_DUMP   MOVEM.L   (A7)+,D0-D2/A0/A5-A6 ; (a7) now contains <ret> <sr> <pc>
+          BRA.S     SR_DUMP1
+
+; entry point when job's registers saved but no waiting MultiMon
+
+SR_NOACT  MOVE.L    A4,-(A7)        ; re-stack return addr (points to msg)
+          MOVEM.L   JB_D0-JB_PC(A5),D0-D7/A0-A6 ; set all other regs
+
+; common entry point
+
+SR_DUMP1  MOVEM.L   D0-D7/A0-A6,-(A7) ; save all regs
+
+; at this point the stack contains:
+; $00(a7) - $1c(a7) D0-D7
+; $20(a7) - $38(a7) A0-A6
+; $3c(a7)           return address (exception message)
+; $40(a7)           saved SR
+; $42(a7)           saved PC
+; USP               saved user SP
+
+; Now display a message on channel 0/1 followed by register values
+; (it would be nicer to use the register window display routine here but since
+; we don't have the data area set up and channel #0 has room for only about 5
+; lines of text the information should be as concise as possible).
+
+          LEA       EXCPTMSG,A1
+          BSR       SRD_OUT         ; print 'Exception at PC='
+          MOVE.L    $42(A7),D1
+          BSR       SRD_HEXL        ; print offending pc value
+          LEA       COLONMSG,A1
+          BSR       SRD_OUT
+          MOVE.L    $3C(A7),A1
+          BSR       SRD_OUT         ; print exception message
+          LEA       D0MSG,A1
+          BSR       SRD_OUT         ; 'D0-D7:'
+          MOVE.L    A7,A3
+          MOVEQ     #7,D7
+SRD_DLP   MOVE.L    (A3)+,D1
+          BSR       SRD_HEXL        ; print each data register
+          DBF       D7,SRD_DLP
+          LEA       A0MSG,A1
+          BSR       SRD_OUT         ; 'A0-A7:'
+          LEA       $20(A7),A3
+          MOVEQ     #6,D7
+SRD_ALP   MOVE.L    (A3)+,D1
+          BSR       SRD_HEXL        ; print each address register
+          DBF       D7,SRD_ALP
+          MOVE      USP,A1
+          MOVE.L    A1,D1
+          BSR       SRD_HEXL        ; print USP
+          LEA       SRMSG,A1
+          BSR       SRD_OUT         ; print 'SR:'
+          LEA       $40(A7),A1
+          SUBA.W    #18,A7
+          MOVE.L    A7,A0
+          MOVE.W    #16,(A0)+
+          SUBA.L    A6,A0
+          SUBA.L    A6,A1
+          MOVE.W    CN_ITOBW,A2     ; convert to binary
+          JSR       (A2)
+          LEA       -18(A6,A0.L),A1
+          BSR.S     SRD_OUT         ; print SR
+          ADDA.W    #18,A7
+          LEA       JOBMSG,A1       ; print 'Job ID:'
+          BSR.S     SRD_OUT
+          MOVEQ     #MT_INF,D0
+          TRAP      #1
+          MOVE.L    A0,A6
+          BSR.S     SRD_HEXL        ; print Job ID
+          LEA       BRKTMSG,A1
+          BSR.S     SRD_OUT
+          MOVE.L    SV_JBPNT(A6),A1
+          MOVE.L    (A1),A1
+          LEA       JB_END+6(A1),A1
+          CMPI.W    #$4AFB,(A1)+    ; Name marker (if any)
+          BNE.S     SRD_LF
+          BSR.S     SRD_OUT
+SRD_LF    LEA       LFMSG,A1        ; followed by LF
+          BSR.S     SRD_OUT
+          LEA       HALT,A1
+          MOVE.L    A1,$42(A7)      ; return to HALT after RTE
+          BSR       GET_TOMB        ; locate Tomb job
+          BNE.S     SRD_REST        ; out of luck, leave PC at HALT
+          BSR       FINDJB          ; get job table addr
+          BNE.S     SRD_REST        ; shouldn't occur, but just in case
+          MOVE.L    A0,SV_JBPNT(A6) ; make this current so PC gets saved in
+          LEA       JB_END(A1),A1   ; Tomb job header, preserving original PC
+          MOVE.L    A1,$42(A7)      ; set job to loop forever in Tomb code
+SRD_REST  MOVEM.L   (A7)+,D0-D7/A0-A6 ; restore registers
+          ADDQ.L    #4,A7           ; discard return from SAVREGS call
+          RTE                       ; return from exception
+
+HALT      BRA.S     *               ; keep looping around
+
+; print value of D1.L in hex followed by space
+          
+SRD_HEXL  SUBA.W    #12,A7
+          MOVE.L    A7,A0
+          MOVE.W    #9,(A0)+
+          JSR       CN_HEXL
+          MOVE.B    #' ',(A0)+
+          MOVE.L    A7,A1
+          BSR.S     SRD_OUT
+          ADDA.W    #12,A7
+          RTS
+
+; print string at (A1)
+
+SRD_OUT   SUBA.L    A0,A0           ; use channel 0 or 1
+          MOVE.W    UT_MTEXT,A2
+          JMP       (A2)
+
+EXCPTMSG  STRING$   {'*** MULTIMON caught Exception at PC='}
+COLONMSG  STRING$   {': '}
+D0MSG     STRING$   {'D0-D7: '}
+A0MSG     STRING$   {LF,'A0-A7: '}
+SRMSG     STRING$   {LF,'SR: '}
+JOBMSG    STRING$   {' Job: '}
+BRKTMSG   STRING$   {' ('}
+LFMSG     STRING$   {')',LF}
 
 *--------------------------------------------------------------------          
 * Find details of a job, given its ID in D1
+* NB: High word of D1 may be zero, else it should match job tag
 * Returns: A0 ptr to job table entry
 *          A1 ptr to job header
 *          D0 0 OK, ERR.NJ if invalid ID
+*          D1 real job ID
 *--------------------------------------------------------------------
 
 FINDJB    MOVE.L    D1,-(A7)        ; Save D1
@@ -486,7 +813,8 @@ FJ_END    MOVE.L    (A7)+,D1
           RTS
           
 *--------------------------------------------------------------------
-* We get here in Supervisor mode.
+* This routine should be JMP'ed to when we're about to run code from
+* a job being monitored (Call, Jump, Trace or eXecute command).
 *
 * Check the current job to see if it is active, or the monitor, error
 * out in either case.
@@ -496,61 +824,77 @@ FJ_END    MOVE.L    (A7)+,D1
 *    Priority is set, if not, set it to 32.
 * Fiddle about in our own job's header to set the following:
 *    Job is waiting for another to complete
-*    Set the PC to be MAIN_REST on reactivation
-*    Clear the SR.
+* 20210327-JB: Call MT_RELJOB to cleanly do the scheduling now!
 *--------------------------------------------------------------------
-RESTREGS  MOVEQ     #MT_INF,D0
-          TRAP      #1
-          MOVE.L    A0,A5
-          TRAP      #0
+RESTREGS  TRAP      #0              ; enter supervisor mode
           MOVE.L    OWN_JB(A6),D1
-          BSR       FINDJB
-          MOVE.L    A0,A2
-          MOVE.L    EXJB_ID(A6),D1
-          BSR       FINDJB
-          BNE.S     RR_BADJB
-          MOVE.L    A0,$64(A5)
-          MOVE.L    (A2),A2
+          BSR       FINDJB          ; get our own job table entry
+          MOVE.L    A0,A2           ; pass to A2
+          MOVE.L    EXJB_ID(A6),D1  ; job to be (re-)activated
+          CMP.L     OWN_JB(A6),D1
+          BEQ.S     RR_BADJB        ; do not do this on ourself!
+          BSR       FINDJB          ; now get monitored job's details
+          BNE.S     RR_BADJB        ; it's gone - return to main loop
+          TST.B     JB_PRINC(A1)    ; job's priority
+          BEQ.S     RR_STAT         ; if zero, don't test JB_STAT
+          TST.W     JB_STAT(A1)     ; test status - must be suspended
+          BEQ.S     RR_BADJB        ; if not, return error
+RR_STAT   MOVE.L    (A2),A2         ; get ptr to our own job header
           
 *--------------------------------------------------------------------
-* Show the monitor to be waiting for another job, and set the SR to
-* zero (all off) and the PC = MAIN_REST when we are next reactivated.
+* Show the monitor to be waiting for another job. It will be suspended
+* when releasing the monitored job and continue when the monitored job
+* has finished, but only if no exception occurs in the meantime!
+* Note: We can't do this using MT.SUSJB since SMSQ/E doesn't allow
+* JB_STAT to be set to -2, and using MT.ACTIV will at best restart
+* the monitored job from the beginning!
 *--------------------------------------------------------------------          
-          MOVE.W    #-2,$14(A2)
-          LEA       MAIN_REST,A0
-          MOVE.L    A0,$62(A2)
-          CLR.W     $60(A2)
+          MOVE.W    #-2,JB_STAT(A2)
+; old code to be removed
+;          LEA       MAIN_REST,A0    
+;          MOVE.L    A0,JB_PC(A2)
+;          CLR.W     JB_SR(A2)
           
 *--------------------------------------------------------------------
 * Set the monitored job to have a job (the monitor) waiting on it and
-* make sure that the priority will increment.
+* make sure that the priority is nonzero.
 *--------------------------------------------------------------------
-          TAS       $17(A1)
-          MOVE.L    OWN_JB(A6),$18(A1)
-          TST.B     $13(A1)
+          TAS       JB_WFLAG(A1)
+          MOVE.L    OWN_JB(A6),JB_WJOB(A1)
+          TST.B     JB_PRINC(A1)
           BNE.S     REL_JB
-          MOVE.B    #32,$13(A1)
+          MOVE.B    #32,JB_PRINC(A1)
 
 *--------------------------------------------------------------------
 * Ready to release the monitored job. We set it to be active first,
-* then push it's PC and SR onto the supervisor stack ready for the
-* RTE, set it's USP to what it was before we interrupted it with the
-* monitor, restore its registers from our storage and when the RTE
-* fires, the job will run from its PC and with the SR set as per what
-* we put on the SSP.
+* then use MT_RELJOB from user mode which also suspends the monitor.
+* Note: the next instruction ensures that the monitored job WILL be 
+* released even if a scheduler interrupt occurs between going into
+* user mode and calling MT_RELJOB, which would also suspend us!
 *--------------------------------------------------------------------   
-REL_JB    CLR.W     $14(A1)
-          MOVE.L    IM_PC(A6),-(A7)
-          MOVE.W    IM_SR(A6),-(A7)
-          MOVE.L    IM_USP(A6),A0
-          MOVE      A0,USP
-          MOVEM.L   IM_D0(A6),D0-D7/A0-A6
-          RTE
+REL_JB    MOVE.W    #1,JB_STAT(A1)  ; in case an interrupt occurs before
+                                    ; the following code!
+          MOVE.L    IM_PC(A6),JB_PC(A1) ; set job's PC from monitor's image
+          MOVE.W    IM_SR(A6),JB_SR(A1) ; Id. for SR
+          LEA       IM_D0(A6),A0
+          LEA       JB_D0(A1),A1
+          MOVEQ     #15,D0          ; Copy other 16 register's values
+RR_CPREG  MOVE.L    (A0)+,(A1)+     ; from our image to actual job header
+          DBF       D0,RR_CPREG
+          ANDI      #$DFFF,SR       ; Go into user mode again
+          MOVEQ     #MT_RELJB,D0
+          TRAP      #1              ; Release job (and wait for it to finish)
+          
+* We only get here when the released job committed suicide. Print a message
+* and return to the main loop.
+
+          LEA       FINMSG,A1
+          BRA       MAIN_REST
           
 *--------------------------------------------------------------------
-* We arrive here if the current job happens to be inactive or if it
-* is the monitor. Clear supervisor mode and display an 'invalid job'
-* error.
+* We arrive here if the current job happens to be active, removed or 
+* if it is the monitor. Clear supervisor mode and display an 
+* 'invalid job' error.
 *--------------------------------------------------------------------
 RR_BADJB  ANDI      #$DFFF,SR       ; Clear supervisor mode
           MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
@@ -561,18 +905,23 @@ RR_BADJB  ANDI      #$DFFF,SR       ; Clear supervisor mode
           MOVEQ     #-2,D0          ; Error 'Invalid Job'
           BRA       PRT_ERR         ; Do error message then -> main loop
 
+FINMSG    STRING$   {'Job has finished',LF}
+
 *--------------------------------------------------------------------
 * Read some text from the user via whatever channel is in A0 at call
 * time. Exits with the data length stored at the start of the buffer,
 * but does not include the newline character, and A1 pointing at the
 * data length word.
 *--------------------------------------------------------------------
-RDSTRING  LEA       DISBUF+2(A6),A2 ; Buffer address
+RDSTRING  LEA       DISBUF(A6),A2   ; Buffer address
+          CLR.W     (A2)+           ; Initalise null string
           MOVEQ     #DISBUFLEN-2,D2 ; Buffer size
           BSR.S     RDLIN_2         ; Fetch some text
+          BNE.S     RDS_RTS         ; Return immediately with errors
           SUBQ.W    #1,D1           ; Discount the newline
           MOVE.W    D1,-(A1)        ; Save the data length
-          RTS                       ; Done
+          MOVEQ     #0,D0           ; Ensure no error status
+RDS_RTS   RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Enter at READ_LINE to default to using the buffer at DISBUF(A6) for
@@ -598,6 +947,7 @@ RDLIN_2   MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
           MOVEQ     #IO_FLINE,D0
           TRAP      #3              ; Fetch some input
           MOVE.L    A2,A1           ; Restore buffer address
+          TST.L     D0              ; NEW: set status flags
           RTS                       ; Done
 
 *--------------------------------------------------------------------
@@ -649,7 +999,15 @@ RDLIN_2   MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
 *--------------------------------------------------------------------
 GET_ADDR  MOVEM.L   D2-D4/A0-A1,-(A7)   ; Save workers
           BSR.S     READ_LINE       ; Read some text from the user
-          MOVEQ     #0,D4           ; Clear the running total
+          BNE       GTAD_RTS        ; But bail out with errors
+          BRA.S     GTAD_INI        
+
+*-----------------------------------------------------------
+* Enter here when the expression is already buffered at (A1)
+*-----------------------------------------------------------
+GTAD_EVL  MOVEM.L   D2-D4/A0-A1,-(A7)
+
+GTAD_INI  MOVEQ     #0,D4           ; Clear the running total
 
 *--------------------------------------------------------------------
 * For the start/next part of the expression, do we have a '+' or '-'
@@ -806,7 +1164,7 @@ GTAD_6    MOVE.B    (A1)+,D0        ; Hopefully a '0' to '7'
           BEQ.S     GTAD_IL         ; Yes, accumulate it in D1
           CMPI.B    #'W',D0         ; Word then?
           BNE.S     GTAD_ERR        ; No, exit with error
-          MOVE.W    2(A6,D2.W),D0   ; Yes, read the low word from storage
+          MOVE.W    IM_D0+2(A6,D2.W),D0   ; Yes, read the low word from storage
           EXT.L     D0              ; And sign extend it to long
           ADD.L     D0,D1           ; Accumulate the word value
           BRA.S     GTAD_COM        ; Skip and check for <regexpr> end
@@ -815,7 +1173,7 @@ GTAD_6    MOVE.B    (A1)+,D0        ; Hopefully a '0' to '7'
 * Read a register value (long) from storage, and accumulate it in the
 * current <regexpr>'s running total.
 *--------------------------------------------------------------------
-GTAD_IL   ADD.L     0(A6,D2.W),D1   ; Add in a register from storage
+GTAD_IL   ADD.L     IM_D0(A6,D2.W),D1   ; Add in a register from storage
 
 *--------------------------------------------------------------------
 * After each register, do we have a comma? If so, loop around to get
@@ -1166,12 +1524,23 @@ DSPR_LP   ADDQ.W    #4,A0           ; Skip past EOL and 'Dx '
 * Print out the relative mode details on the final line of the
 * REGISTER window.
 *--------------------------------------------------------------------
-PR_REL    MOVE.L    D1,4(A1)
-          MOVEQ     #7,D2
+PR_REL    MOVE.L    D1,4(A1)        ; Buffer 'ON  ' or 'OFF '
+          MOVE.B    #' ',8(A1)      ; Buffer extra space
+          MOVEQ     #9,D2
           MOVEQ     #IO_SSTRG,D0
-          TRAP      #3
-          MOVEQ     #'>',D4
-          BRA       DSPREGP
+          TRAP      #3              ; Print REL ON/OFF + 2/1 spaces
+          MOVE.L    BASE_PNT(A6),A1 ; get job's start address
+          ADDQ.L    #6,A1           ; point to marker word
+          CMPI.W    #$4AFB,(A1)+    ; does it have a header?
+          BNE.S     DSPR_END        ; no, skip
+          MOVE.W    (A1)+,D2        ; get name length
+          CMPI.W    #24,D2
+          BLE.S     DSPR_NAM        ; but chop off excessive long names
+          MOVEQ     #24,D2
+DSPR_NAM  MOVEQ     #IO_SSTRG,D0
+          TRAP      #3              ; print name
+DSPR_END  MOVEQ     #'>',D4
+          BRA       DSPREGP         ; make register pointer visible again
 
 *--------------------------------------------------------------------
 * Blank template that is used to display the registers in the main 
@@ -1492,21 +1861,10 @@ DSPDIS_2  MOVE.W    D4,D2           ; How many bytes to print
           TRAP      #3              ; Print disassembly line
           RTS                       ; Done
 
+* ++++++++++++++++++
+* EXCEPTION HANDLERS
+* ------------------
 
-*--------------------------------------------------------------------
-* EXCEPTION MESSAGES
-* In the unlikely event of an exception hapening, the following are
-* the messages that will be displayed.
-*--------------------------------------------------------------------
-ADDERRMSG STRING$   {'Address Error',LF}
-ILLINSMSG STRING$   {'Illegal Instruction',LF}
-DIVZERMSG STRING$   {'Division by zero',LF}
-CHKMSG    STRING$   {'CHK Exception',LF}
-TRAPVMSG  STRING$   {'TRAPV Exception',LF}
-PRIVMSG   STRING$   {'Privilege Violation',LF}
-BRKPNTMSG STRING$   {'Breakpoint Executed',LF}
-INTL7MSG  STRING$   {'Interrupt Level 7',LF}
-NOBRKMSG  STRING$   {'Not a Breakpoint',LF}
 *--------------------------------------------------------------------
 * Interrupt Level 7 handler.
 * If this gets called, the chances are the QL is locked up as the
@@ -1554,8 +1912,8 @@ EXINTL7   MOVE.L    A3,-(A7)        ; Save A3 for a bit
           MOVE.B    #1,-$1D(A3)     ; $18003 PC_IPCWR - ???? -> TODO
           MOVE.L    (A7)+,A3        ; Restore A3
           JSR       SAVREGS         ; Save monitored job's registers
-          LEA       INTL7MSG,A1     ; Message to print
-          BRA.S     MAINERR1        ; Bale out
+          STRING$   {'Interrupt Level 7',LF}
+          BRA       MAIN_ERR        ; Bale out
 
 *--------------------------------------------------------------------
 * Address Error handler.
@@ -1566,17 +1924,20 @@ EXINTL7   MOVE.L    A3,-(A7)        ; Save A3 for a bit
 *--------------------------------------------------------------------
 EXADDERR  ADDQ.W    #8,A7           ; Point at the SR on the SSP
           JSR       SAVREGS         ; Save REGS and reschedule
-          LEA       ADDERRMSG,A1    ; Message to print
-          BRA.S     MAINERR1        ; Bale out
+          STRING$   {'Address Error',LF}
+          BRA       MAIN_ERR        ; Bale out
 
 *--------------------------------------------------------------------
 * Illegal Instruction handler.
 * Save the registers.
 * Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
+
+; 20210329: Obsolete now, handled by Breakpoint handler!
+
 EXILLINST JSR       SAVREGS         ; Save REGS and reschedule
-          LEA       ILLINSMSG,A1    ; Message to print
-          BRA.S     MAINERR1        ; Bale out
+ILLINSMSG STRING$   {'Illegal Instruction',LF}
+          BRA       MAIN_ERR        ; Bale out
 
 *--------------------------------------------------------------------
 * Divide by Zero handler.
@@ -1584,7 +1945,7 @@ EXILLINST JSR       SAVREGS         ; Save REGS and reschedule
 * Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
 EXDIVZER  JSR       SAVREGS         ; Save REGS and reschedule
-          LEA       DIVZERMSG,A1    ; Message to print
+          STRING$   {'Division by zero',LF}
           BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
@@ -1593,7 +1954,7 @@ EXDIVZER  JSR       SAVREGS         ; Save REGS and reschedule
 * Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
 EXCHK     JSR       SAVREGS         ; Save REGS and reschedule
-          LEA       CHKMSG,A1       ; Message to print
+          STRING$   {'CHK Exception',LF}
           BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
@@ -1602,7 +1963,7 @@ EXCHK     JSR       SAVREGS         ; Save REGS and reschedule
 * Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
 EXTRAPV   JSR       SAVREGS         ; Save REGS and reschedule
-          LEA       TRAPVMSG,A1     ; Message to print
+          STRING$   {'TRAPV Exception',LF}
           BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
@@ -1611,25 +1972,25 @@ EXTRAPV   JSR       SAVREGS         ; Save REGS and reschedule
 * Print an address error message before hitting the main loop again.
 *--------------------------------------------------------------------
 EXPRIVV   JSR       SAVREGS         ; Save REGS and reschedule
-          LEA       PRIVMSG,A1      ; Message to print
+          STRING$   {'Privilege Violation',LF}
           BRA.S     MAINERR1        ; Bale out
 
 *--------------------------------------------------------------------
-* The code here is executed on any trap #5 to trap #15 by this job,
-* the monitor, not the job being monitored.
-*
-* Breakpoints are activated by TRAP #15 and also arrive here.
-*
-* Save the registers.
-* Print an address error message before hitting the main loop again.
+* The code here is executed on any illegal instruction, including the
+* new Breakpoint code ($4AFB). The Breakpoint table is searched for 
+* the address in question, and the original instruction restored if 
+* found. If the address is not in the Breakpoint table, an 
+* 'Illegal instruction' message is thrown as before.
 *--------------------------------------------------------------------
+BRKPMSG   STRING$   {'Breakpoint Executed',LF}
 EXBRKPNT  JSR       SAVREGS         ; Save REGS and reschedule
-          SUBQ.L    #2,IM_PC(A6)    ; ???? -> TODO
-          SUBQ.L    #2,MEMPTR(A6)   ; Current memory address = this instruction
-          BSR.S     REMOVEBRK       ; Delete a breakpoint here, if necessary
-          LEA       BRKPNTMSG,A1    ; Print 'Breakpoint executed'
-          BEQ.S     MAINERR1
-          LEA       ILLINSMSG,A1
+          DC.W      0               ; No message yet!
+;          SUBQ.L    #2,IM_PC(A6)    ; We now use $4AFB so PC points to 
+;          SUBQ.L    #2,MEMPTR(A6)   ; instruction itself, not thereafter
+          BSR.S     REMOVEBRK       ; Check for Breakpoint and remove
+          LEA       BRKPMSG,A1      ; if necessary, pre-load message
+          BEQ.S     MAINERR1        ; jump if indeed a breakpoint
+          LEA       ILLINSMSG,A1    ; no, it is a real illegal instruction
 
 *--------------------------------------------------------------------
 * I get the impression this is simply here to allow a BRA.S from the
@@ -1637,9 +1998,19 @@ EXBRKPNT  JSR       SAVREGS         ; Save REGS and reschedule
 *--------------------------------------------------------------------
 MAINERR1  BRA.S     MAIN_ERR
 
+*----------------------------------------------------------------------
+* TRAP #5 to #15 are now NOT used anymore for Breakpoints!
+* They only come here if they are not redirected by the job's exception
+* table (when the original vector pointed to just an RTE instruction)
+*----------------------------------------------------------------------
+
+EXTRAP    JSR       SAVREGS
+          STRING$   {'Undefined TRAP',LF}
+          BRA.S     MAIN_ERR
+
 *--------------------------------------------------------------------
 * Delete a breakpoint at the current memory address, if there is one
-* by removing it from the breakpoint table and replacing the TRAP #15
+* by removing it from the breakpoint table and replacing the $4AFB
 * breakpoint code with the instruction that was there previously.
 * If there is no breakpoint, don't worry about it, just return.
 *--------------------------------------------------------------------
@@ -1676,20 +2047,15 @@ UNDO_BRK  BSR.S     REMOVEBRK       ; Look for and remove the breakpoint
           LEA       NOBRKMSG,A1
           BRA.S     MAIN_ERR        ; And back to the main loop
 
-
-*--------------------------------------------------------------------
-* This is a blank message of zero characters in length. 
-*--------------------------------------------------------------------
-NULMSG    DC.W      0
+NOBRKMSG  STRING$   {'Not a Breakpoint',LF}
 
 *--------------------------------------------------------------------
 * MAIN EXECUTION LOOP
 * Reset A6 to point at our (the monitor's) data space then set the
 * stack appropriately before jumping into supervisor mode.
 *--------------------------------------------------------------------
-MAIN_REST JSR       SAVREGS         ; return from finished job
-          CLR.L     MEMPTR(A6)      ; Set Memory Pointer to zero
-          LEA       NULMSG,A1       ; Point to dummy message
+; entry point from start or after monitored job finishes
+MAIN_REST  CLR.L     MEMPTR(A6)      ; Set Memory Pointer to zero
 
 *--------------------------------------------------------------------
 * We enter here from startup, the exception handlers above, amongst
@@ -1715,12 +2081,12 @@ CLRCMD    MOVE.L    A1,A2           ; message to be printed
 IOP.PICK  EQU       $7B
 
           MOVE.L    OWN_JB(A6),D1   ; Our job ID
+;          MOVEQ     #-2,D1
           MOVEQ     #0,D2           ; Nothing to wake
           MOVEQ     #-1,D3          ; Timeout
-          MOVE.L    CMDWND(A6),A0   ; Command window ID
+          MOVE.L    CMDWND(A6),A0 ; Guardian (primary) window ID
           MOVEQ     #IOP.PICK,D0    ; Pick our window to top of pile
           TRAP      #3
-
 ***
 
           MOVEQ     #4,D7           ; we have 5 windows
@@ -1795,10 +2161,6 @@ MAIN_1    MOVE.L    CMDWND(A6),A0   ; Command window to be used
 
 MAIN_2    MOVE.L    CMDWND(A6),A0   ; Command window to be used
           MOVEQ     #-1,D3
-*          MOVEQ     #1,D1           ; 8 pixels wide
-*          MOVEQ     #0,D2           ; 10 pixels high
-*          MOVEQ     #SD_SETSZ,D0
-*          TRAP      #3              ; Set channel font size
           MOVEQ     #'>',D1         ; Cursor character
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3              ; Print cursor
@@ -1806,6 +2168,7 @@ MAIN_2    MOVE.L    CMDWND(A6),A0   ; Command window to be used
           TRAP      #3              ; Make sure cursor is enabled
           MOVEQ     #IO_FBYTE,D0
           TRAP      #3              ; Wait for a single byte to D1.B
+          MOVE.L    SYSVARS(A6),A1  ; Save the pointer to our command window's
           CMPI.B    #'a',D1
           BCS.S     SEARCHTAB       ; D1 is less than 'a' (97)
           CMPI.B    #'z',D1
@@ -2005,7 +2368,10 @@ QMON_BRK  TST.L     (A0)            ; Breakpoint in this slot?
 
 BRKNXT    ADDQ.W    #6,A0           ; Point at next slot
           DBF       D0,QMON_BRK     ; Do the whole table
-
+          MOVE.L    EXJB_ID(A6),D1  ; ID of examined job
+          BSR       FINDJB          ; get details
+          BNE.S     QMON_OK         ; it has gone
+          MOVE.L    EXJB_TRP(A6),JB_TRAPV(A1) ; restore exception table
 *--------------------------------------------------------------------
 * In supervisor mode, check every active job in the job table to see
 * if it is using our vector table. If so, clear out its vector table
@@ -2018,27 +2384,28 @@ BRKNXT    ADDQ.W    #6,A0           ; Point at next slot
 *
 * It's a QDOS thing!
 *--------------------------------------------------------------------
-          MOVEQ     #MT_INF,D0
-          TRAP      #1              ; Get sysvars address
-          TRAP      #0              ; Supervisor mode
-          MOVE.W    $62(A0),D0      ; SV_JBMAX = Highest job to date
-          MOVE.L    $68(A0),A3      ; SV_JBBAS = Base of job table
-          LEA       EXTAB-$54(A6),A2    ; Vector table address
+;          MOVEQ     #MT_INF,D0
+;          TRAP      #1              ; Get sysvars address
+;          TRAP      #0              ; Supervisor mode
+;          MOVE.W    $62(A0),D0      ; SV_JBMAX = Highest job to date
+;          MOVE.L    $68(A0),A3      ; SV_JBBAS = Base of job table
+;          LEA       EXTAB-$54(A6),A2    ; Vector table address
 
-QMON_LP   TST.B     (A3)            ; $FF000000 = Inactive job
-          BLT.S     QMON_NXT        ; Skip those
-          MOVE.L    (A3),A1         ; Base of job
-          CMPA.L    $1C(A1),A2      ; JB_TRAPV = Vector table
-          BNE.S     QMON_NXT        ; It's not using our vector table
-          CLR.L     $1C(A1)         ; It was, clear it out
+;QMON_LP   TST.B     (A3)            ; $FF000000 = Inactive job
+;          BLT.S     QMON_NXT        ; Skip those
+;          MOVE.L    (A3),A1         ; Base of job
+;          CMPA.L    $1C(A1),A2      ; JB_TRAPV = Vector table
+;          BNE.S     QMON_NXT        ; It's not using our vector table
+;
+;          CLR.L     $1C(A1)         ; It was, clear it out
 
-QMON_NXT  ADDQ.W    #4,A3           ; Next job table entry
-          DBF       D0,QMON_LP      ; Do the whole table
-          CLR.L     $50(A0)         ; Clear SV_TRAPV = current vector table
-          LEA       MON_VARS,A0     ; Pointer to our data space
-          CLR.L     (A0)         ; Clear it
-          ANDI      #$DFFF,SR       ; User mode
-          MOVEQ     #0,D0           ; No errors
+;QMON_NXT  ADDQ.W    #4,A3           ; Next job table entry
+;          DBF       D0,QMON_LP      ; Do the whole table
+;          CLR.L     $50(A0)         ; Clear SV_TRAPV = current vector table
+;          LEA       MON_VARS,A0     ; Pointer to our data space
+;          CLR.L     (A0)         ; Clear it
+;          ANDI      #$DFFF,SR       ; User mode
+QMON_OK    MOVEQ     #0,D0           ; No errors
 
 
 *--------------------------------------------------------------------
@@ -2067,8 +2434,7 @@ QUITMSG   STRING$   {LF,'Exit from MULTIMON',LF}
 *--------------------------------------------------------------------
 * Message to be displayed when an address is entered incorrectly.
 *--------------------------------------------------------------------
-HEXERRMSG DC.W      12
-          DC.B      'Syntax error'
+ADDERRMSG STRING$   {'Syntax error in expression'}
           DS.W      0
 
 *--------------------------------------------------------------------
@@ -2079,7 +2445,7 @@ GETADDR1  JSR       GET_ADDR        ; Get an address
           BEQ.S     GTAD1_RTS       ; All ok
           ADDQ.W    #4,A7           ; Tidy return address of caller
 
-HEXERR    LEA       HEXERRMSG,A1    ; Error message to print
+HEXERR    LEA       ADDERRMSG,A1    ; Error message to print
           MOVE.L    CMDWND(A6),A0   ; Print it in the command window
           MOVE.W    UT_MTEXT,A2     ; Vector
           JSR       (A2)            ; Print message
@@ -2125,6 +2491,7 @@ MAIN_2A   BRA       MAIN_2          ; Go around again
 *--------------------------------------------------------------------
 SREG      BSR.S     GETADDR1        ; Evaluate an address expression
           MOVE.W    REGPTR(A6),D0   ; Which register to change?
+          ADDI.W    #IM_D0,D0       ; Add offset of IM_D0
           CMPI.W    #IM_SR,D0       ; Is it the SR?
           BNE.S     SREG_1          ; No, skip
 
@@ -2209,24 +2576,20 @@ CALL      BSR.S     SET_PC          ; Get the address to call
 
 *--------------------------------------------------------------------
 * We return here when the called code does an RTS.
-*
-* ???? -> TODO
-* I'm not sure why we copy the 6 bytes from the called job's stack
-* (USP) when we come back after a call command. In theory, the long
-* word on the stack should be the current memory pointer as we put
-* it there before executing the call - but what are the two other 
-* bytes?
+* We just fake an exception by copying the SR and return address onto
+* the SSP and enter supervisor mode
 *--------------------------------------------------------------------
 CALL_RET  MOVE      SR,-(A7)        ; Save SR on USP
           TRAP      #0              ; Supervisor mode required
           SUBQ.W    #6,A7           ; Create stack frame on SSP
-          MOVE.L    A0,-(A7)        ; Save A0 too
+          MOVE.L    A0,-(A7)        ; Save A0 to SSP
           MOVE      USP,A0          ; Get the job's USP into A0
-          MOVE.W    (A0)+,4(A7)     ; ???? -> TODO
-          MOVE.L    (A0)+,6(A7)     ; ???? -> TODO
+          MOVE.W    (A0)+,4(A7)     ; Save original SR to SSP
+          MOVE.L    (A0)+,6(A7)     ; And original return address
           MOVE      A0,USP          ; Update USP
           MOVE.L    (A7)+,A0        ; Restore A0
           JSR       SAVREGS         ; Copy job's registers to storage
+          DC.W      0               ; No message to display
           BRA       MAIN_LOOP       ; Guess!
 
 *--------------------------------------------------------------------
@@ -2242,6 +2605,7 @@ TRACE     MOVE.L    MEMPTR(A6),D1   ; Current memory pointer
 
 EXTRACE   BCLR      #7,(A7)         ; Clear trace bit
           JSR       SAVREGS         ; Copy registers to storage
+          DC.W      0               ; No message to display
           BRA       MAIN_LOOP       ; Guess!
 
 *--------------------------------------------------------------------
@@ -2278,7 +2642,7 @@ BRKP_LOOP TST.L     (A1)            ; Free slot?
           DBF       D0,BRKP_LOOP    ; And check that one too
 
           LEA       BRKFULMSG,A1    ; No more breakpoints message
-          MOVE.W    UT_MTEXT,A2
+BRKP_ERR  MOVE.W    UT_MTEXT,A2
           JSR       (A2)            ; Print it
           ADDQ.L    #4,A7           ; Tidy the return address
           BRA       MAIN_1          ; Back into the main loop
@@ -2290,8 +2654,13 @@ BRKP_LOOP TST.L     (A1)            ; Free slot?
 ENTBRKP   MOVE.L    D1,(A1)+        ; Save the breakpoint address
           MOVE.L    D1,A0           ; Copy the address
           MOVE.W    (A0),(A1)       ; Save the instruction word
-          MOVE.W    #$4E4F,(A0)     ; Insert a breakpoint TRAP #15
-          RTS                       ; Done
+          MOVE.W    #$4AFB,(A0)     ; Insert a breakpoint $4AFB
+          CMP.W     #$4AFB,(A0)     ; Check if it's not ROM!
+          BNE.S     BRKP_ROM          ; Bad luck!
+          RTS       
+BRKP_ROM  CLR.L     -(A1)           ; Clear entry again
+          LEA       BRKERMSG,A1
+          BRA       BRKP_ERR
 
 *--------------------------------------------------------------------
 * B: Set Breakpoint.
@@ -2302,9 +2671,9 @@ BRKP_END  BRA       MAIN_LOOP       ; Breakpoint set, go around again
 *--------------------------------------------------------------------
 * Error when we set too many breakpoints.
 *--------------------------------------------------------------------
-BRKFULMSG DC.W      21
-          DC.B      10,'Too many breakpoints'
+BRKFULMSG STRING$   {LF,'Too many breakpoints'}
           DS.W      0
+BRKERMSG  STRING$   {LF,'Cannot set breakpoint (ROM?)'}
 
 *--------------------------------------------------------------------
 * F3: Disassemble to screen
@@ -2571,32 +2940,7 @@ MDMSG_END EQU       *
 MD_MSG2   DC.W      16
           DC.B      '0123456789ABCDEF'
 
-*--------------------------------------------------------------------
-* A: Alter memory.
-*--------------------------------------------------------------------
-ALT_MEM   MOVEQ     #10,D1          ; Newline character
-          MOVEQ     #IO_SBYTE,D0
-          TRAP      #3              ; Print it
-          MOVE.L    MEMPTR(A6),A4   ; Current memory pointer
-
-*--------------------------------------------------------------------
-* Main loop for the Alter Memory command.
-*--------------------------------------------------------------------
-AM_LOOP   LEA       DISBUF(A6),A0   ; Output buffer address
-          MOVE.L    A4,D1           ; Current memory pointer
-          JSR       CN_ADDR         ; Show 5 bytes only of the address
-          MOVE.B    #':',(A0)+      ; Then a colon
-          MOVE.B    #' ',(A0)+      ; Then a space
-          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
-          MOVEQ     #-1,D3          ; Timeout
-          LEA       DISBUF(A6),A1   ; Data to print
-          MOVEQ     #ADDRLEN+2,D2   ; Data size 8 bytes + colon + space
-          MOVEQ     #IO_SSTRG,D0
-          TRAP      #3              ; Print address, colon, space
-          BSR.S     HEX_LINE        ; Get the new value
-          BEQ       MAIN_LOOP       ; No bytes got, skip to main loop
-          MOVE.L    A4,MEMPTR(A6)   ; New memory pointer stored
-          BRA.S     AM_LOOP         ; Do more
+AM_MSG    STRING$   {LF,'Enter hex string or quoted ASCII string, empty line to end',LF}
 
 *--------------------------------------------------------------------
 * Fetch a line of input from the user. It should be valid hexadecimal
@@ -2613,6 +2957,12 @@ AM_LOOP   LEA       DISBUF(A6),A0   ; Output buffer address
 * 0hhhhh<10> 
 *
 * Thus, giving a valid, even number of hex to convert.
+* 20210331: Now accepts quoted ASCII input too.
+* Call parameters:   A4 location for result
+* Return parameters: D1 number of bytes stored
+*                    A4 updated location
+*                     Z flag set if empty input given
+*                    Uses DISBUF as buffer
 *--------------------------------------------------------------------
 HEX_LINE  LEA       DISBUF+1(A6),A1 ; Buffer start - leaves a space
 ;                                   ; for a leading zero if required
@@ -2620,14 +2970,32 @@ HEX_LINE  LEA       DISBUF+1(A6),A1 ; Buffer start - leaves a space
           MOVEQ     #IO_FLINE,D0    ; Prepare to fetch data
           TRAP      #3              ; Fetch!
           SUBQ.W    #1,D1           ; Did we get anything?
-          BEQ.S     HEXL_END        ; No, just a newline - done.
+          BEQ.S     HEXL_RTS        ; No, just a newline - done.
 
 *--------------------------------------------------------------------
 * Prefix the odd number of hex chars with a zero character, if we
 * read in an odd number of characters. I like this!
 *--------------------------------------------------------------------
           LEA       DISBUF+1(A6),A1 ; Buffer start address 
-          MOVE.L    A4,A5           ; Copy current memory pointer
+          CMPI.B    #$27,(A1)       ; First character is single quote?
+          BNE.S     HL_HEX          ; No, assume hex input
+          MOVEQ     #0,D4           ; initialise counter
+          ADDQ.L    #1,A1           ; step past initial quote
+HL_ASCLP  MOVE.B    (A1),D1         ; get character
+          CMPI.B    #LF,D1          ; EOL reached?
+          BEQ.S     HEXL_END        ; yes, exit
+          CMPI.B    #$27,D1         ; is it a quote?
+          BNE.S     HL_STOR         ; no, store it
+          CMPI.B    #LF,1(A1)       ; at end of line?
+          BEQ.S     HEXL_END        ; yes, don't store closing quote
+HL_STOR   MOVE.B    D1,(A4)+        ; else, store it
+          ADDQ.W    #1,D4           ; bump counter
+HL_QUOT   ADDQ.L    #1,A1           ; step to next character
+          BRA       HL_ASCLP        ; and loop back
+
+; parse hex string
+
+HL_HEX    MOVE.L    A4,A5           ; copy memory pointer
           LSR.W     #1,D1           ; Bytes in input /2
           BCC.S     HL_1            ; It was an even length input
           MOVE.B    #'0',-(A1)      ; Odd length, high nibble is always '0'
@@ -2651,9 +3019,8 @@ GET_HLINE MOVE.B    2(A1),D6        ; Save third character = do byte pairs
           CMPI.B    #10,D6          ; Are we done yet?
           BNE.S     GET_HLINE       ; No, keep going
           MOVE.L    A5,A4           ; A4 is the new current memory pointer
-          MOVE.W    D4,D1           ; D1 is the number of bytes stored.
-
-HEXL_END  RTS                       ; Done
+HEXL_END  MOVE.W    D4,D1           ; D1 is the number of bytes stored.
+HEXL_RTS  RTS                       ; Done
 
 *--------------------------------------------------------------------
 * Handle invalid hexadecimal characters in the user's input.
@@ -2671,6 +3038,35 @@ HEXL_ERR  ADDQ.W    #4,A7           ; Caller address tidied away
 *--------------------------------------------------------------------
 BADHEXMSG DC.B      0,7,'Bad Hex'
           DS.W      0
+
+*--------------------------------------------------------------------
+* A: Alter memory.
+*--------------------------------------------------------------------
+ALT_MEM   LEA       AM_MSG,A1
+          MOVE.W    (A1)+,D2
+          MOVEQ     #IO_SSTRG,D0
+          TRAP      #3              ; Print message
+          MOVE.L    MEMPTR(A6),A4   ; Current memory pointer
+
+*--------------------------------------------------------------------
+* Main loop for the Alter Memory command.
+*--------------------------------------------------------------------
+AM_LOOP   LEA       DISBUF(A6),A0   ; Output buffer address
+          MOVE.L    A4,D1           ; Current memory pointer
+          JSR       CN_ADDR         ; Show address
+          MOVE.B    #':',(A0)+      ; Then a colon
+          MOVE.B    #' ',(A0)+      ; Then a space
+          MOVE.L    A0,D2           ; copy end pointer
+          MOVE.L    CMDWND(A6),A0   ; COMMAND window ID
+          MOVEQ     #-1,D3          ; Timeout
+          LEA       DISBUF(A6),A1   ; Data to print
+          SUB.L     A1,D2           ; length of address + colon + space
+          MOVEQ     #IO_SSTRG,D0
+          TRAP      #3              ; Print address, colon, space
+          BSR       HEX_LINE        ; Get the new value
+          BEQ       MAIN_LOOP       ; No bytes got, skip to main loop
+          MOVE.L    A4,MEMPTR(A6)   ; New memory pointer stored
+          BRA.S     AM_LOOP         ; Do more
 
 *--------------------------------------------------------------------
 * S: Search for a hexadecimal string.
@@ -2692,7 +3088,7 @@ FIND_HEX  MOVEQ     #':',D1         ; Prompt for COMMAND window
           MOVEQ     #IO_SBYTE,D0
           TRAP      #3              ; Print prompt
           LEA       HEXSTR+2(A6),A4 ; Buffer for characters gotten
-          BSR.S     HEX_LINE        ; Get hex bytes
+          BSR       HEX_LINE        ; Get hex bytes
           LEA       HEXSTR(A6),A5   ; Word count location
           MOVE.W    D1,D7           ; How many bytes?
           SUBQ.W    #1,D7           ; No linefeed required
@@ -2851,7 +3247,7 @@ OPEN_FILE LEA       FN_MSG,A1       ; 'File Name' prompt
           MOVE.W    UT_MTEXT,A2
           JSR       (A2)            ; Print prompt
           BSR       RDSTRING        ; Read the desired filename
-
+          BNE.S     OP_ERR          ; Exit with errors
 OP_AGAIN  LEA       DISBUF(A6),A0   ; Get the filename
           MOVEQ     #-1,D1          ; This job's ID
           MOVE.L    D4,D3           ; Open Type 
@@ -2864,7 +3260,7 @@ OP_AGAIN  LEA       DISBUF(A6),A0   ; Get the filename
           BEQ.S     OP_EXISTS       ; Yes it does
 
           SUBQ.L    #8,D0           ; Reset the error code
-          MOVE.L    CMDWND(A6),A0   ; COMMAND CHANEL
+OP_ERR    MOVE.L    CMDWND(A6),A0   ; COMMAND CHANEL
           MOVE.W    UT_ERR,A2
           JSR       (A2)            ; Print error message
           LEA       MAIN_2,A1       ; Where we want to be
@@ -3031,7 +3427,7 @@ DIS_WRK   MOVE.L    CMDWND(A6),A0   ; COMMAND window
           SUBQ.W    #1,D1           ; Get anything?
           BEQ.S     DIS_DEF         ; No, Allocate 1024 bytes workspace
           JSR       READDEC         ; Convert buffer to decimal number
-          CMPI.B    #10,(A1)        ; Newline = valid numeric read
+          CMPI.B    #LF,(A1)        ; Newline = valid numeric read
           BNE.S     DIS_WRK         ; Invalid number, keep prompting
           BRA.S     DIS_ALLOC       ; Allocate requested workspace size
 
@@ -3191,6 +3587,19 @@ OPC_MSG   DC.B      0,24,'Suppress opcode ? (Y/N) '
 *--------------------------------------------------------------------
 DATA_MSG  DC.B      0,12,$0A,'Data areas',$0A
 
+*-------------------------------------------------------------
+* Small subroutine to copy a QL-style string from (A1) to (A2)
+* All registers preserved
+*-------------------------------------------------------------
+COPYSTRG  MOVEM.L   D0/A1-A2,-(A7)
+          MOVE.W    (A1)+,D0
+          MOVE.W    D0,(A2)+
+          BRA.S     CSTR_L2
+CSTR_L1   MOVE.B    (A1)+,(A2)+
+CSTR_L2   DBF       D0,CSTR_L2
+          MOVEM.L   (A7)+,D0/A1-A2
+          RTS
+
 *--------------------------------------------------------------------
 * E: Examine a job.
 *
@@ -3198,6 +3607,8 @@ DATA_MSG  DC.B      0,12,$0A,'Data areas',$0A
 * loaded as a new job (but not started) which we can monitor.
 *--------------------------------------------------------------------
 EXAMINE   JSR       RDSTRING        ; Read the jobid, or filename
+          BNE       PRT_ERR         ; Exit with any error
+EXAM_2    CLR.W     EXJBFNAM(A6)    ; Clear file name
           ADDQ.W    #2,A1           ; Skip the word count
           JSR       READHEX         ; Try to convert to a value in D1
           BNE.S     EX2             ; Invalid characters - try a file
@@ -3210,6 +3621,8 @@ EXAMINE   JSR       RDSTRING        ; Read the jobid, or filename
 EX2       MOVEQ     #1,D4           ; Open mode - old shared (OPEN_IN)
           BSR       OP_AGAIN        ; Try to open it (doesn't return if error)
           LEA       DISBUF(A6),A1   ; Working buffer
+          LEA       EXJBFNAM(A6),A2 ; Where to store the file name
+          BSR       COPYSTRG        ; Save filename
           MOVEQ     #$40,D2         ; Size of buffer
           MOVEQ     #-1,D3          ; Timeout
           MOVEQ     #FS_HEADR,D0
@@ -3226,11 +3639,13 @@ EX2       MOVEQ     #1,D4           ; Open mode - old shared (OPEN_IN)
 *--------------------------------------------------------------------
           MOVE.L    A0,-(A7)        ; Save channel id for file
           MOVE.L    DISBUF(A6),D2   ; File size from header
+          MOVE.L    D2,EXJB_LEN(A6) ; Store it
           MOVEQ     #0,D3           ; Assume dataspace of 0 bytes
           SUBQ.B    #1,DISBUF+5(A6) ; Test for EXECable file
-          BNE.S     EX3             ; Skip if not (avoids junk in D3)
+          BNE.S     EX3             ; Skip if not (avoids junk in D3)          
           MOVE.L    DISBUF+6(A6),D3 ; Data space from header
-EX3       MOVEQ     #-1,D1          ; This job is the owner job
+EX3       MOVE.L    D3,EXJB_DAT(A6) ; Store data size
+          MOVEQ     #-1,D1          ; This job is the owner job
           SUBA.L    A1,A1           ; Start address = start of code        
           MOVEQ     #MT_CJOB,D0
           TRAP      #1              ; Create a new job
@@ -3265,7 +3680,13 @@ EX_ERR    MOVE.L    D0,D4           ; Save error code
 * We are here with a jobid in D1. This is either an existing job or
 * one we just created from a supplied filename.
 *--------------------------------------------------------------------
-GET_JB    BSR       FINDJB
+GET_JB    MOVE.L    D1,-(A7)         ; save new job ID
+          MOVE.L    EXJB_ID(A6),D1   ; ID of previous examined job
+          BSR       FINDJB           ; get details
+          BNE.S     EX_NOPRV         ; if no previous job
+          MOVE.L    EXJB_TRP(A6),JB_TRAPV(A1) ; restore exception table
+EX_NOPRV  MOVE.L    (A7)+,D1
+          BSR       FINDJB
           BEQ.S     COPY_REG
 
 *--------------------------------------------------------------------
@@ -3278,6 +3699,7 @@ BAD_JOB   MOVEQ     #-2,D0          ; Invalid Job id error code
 * We only arrive here if the job id we had in D1 was valid.
 *--------------------------------------------------------------------
 COPY_REG  TRAP      #0              ; Supervisor mode
+          BSR       SETVECS         ; Set exception vectors
           BSR.S     EXAM_REGS       ; Copy registers etc to storage
           ANDI      #$DFFF,SR       ; User mode again
           BSR       DSPREG          ; Display registers
@@ -3293,10 +3715,8 @@ COPY_REG  TRAP      #0              ; Supervisor mode
 * SV_JBPNT Current job's job table entry - depending on the caller,
 * however, we ALWAYS enter and exit here in supervisor mode.
 *--------------------------------------------------------------------
-*** EXAM_REGS MOVE.L    A0,JBPNT(A6)    ; Current job or SuperBASIC
 EXAM_REGS MOVE.L    D1,EXJB_ID(A6)
           BSR       FINDJB          ; Get ptr to job table entry A0
-*          MOVE.L    (A0),A0         ; Obsolete - pointer is now in A1
           LEA       $20(A1),A0      ; Storage in job header, for D0
           LEA       IM_D0(A6),A1    ; A6 = Our dataspace = register storage
           MOVEQ     #15,D0          ; 16 Registers to store
@@ -3327,10 +3747,12 @@ COPY_R_LP MOVE.L    (A0)+,(A1)+     ; Copy a job's register to our storage
 * both SV.TRAPV and JB.TRAPV".
 *
 * It's a QDOS thing!
+* 20210310: Now done by calling SETVECS!
 *--------------------------------------------------------------------
+
           LEA       -$68(A0),A0     ; Start of job header again
-          LEA       EXTAB-$54(A6),A2    ; Vector table address
-          MOVE.L    A2,$1C(A0)      ; JB_TRAPV - vector table
+;          LEA       EXTAB-$54(A6),A2    ; Vector table address
+;          MOVE.L    A2,$1C(A0)      ; JB_TRAPV - vector table
 
 *--------------------------------------------------------------------
 * Get top of allocated memory for the job to save in TP.
@@ -3765,8 +4187,8 @@ HLP1_END  EQU       *
 * WILL CORRUPT THE CODE WHEN RUNNING ON A QL COMPUTER OR EMULATOR!!!!
 *--------------------------------------------------------------------
 HELPMSG2  DC.W      HLP2_END-*-2
-          DC.B      '                             QL MULTIMON V3.0',10
-          DC.B      '                       ',127,' 1986-2018 BY JAN BREDENBEEK',10,10
+          DC.B      '                             QL MULTIMON V[version]',10
+          DC.B      '                       ',127,' 1986-2024 BY JAN BREDENBEEK',10,10
           DC.B      'COMMANDS:',10,10
           DC.B      188,189,190,191,': CHANGE MEMORY POINTER            ALT-',188,189,190,191,': CHANGE REGISTER POINTER',10
           DC.B      'F2: MEMORY DUMP TO SCREEN              F3: DISASSEMBLE TO SCREEN',10

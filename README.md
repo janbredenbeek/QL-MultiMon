@@ -1,10 +1,3 @@
 # QL-MultiMon
-A Machine code monitor and disassembler for the Sinclair QL, originally written in 1986-87. Manual updated February 2017.
-
-Issues solved in v3.00 beta:
-
-- Addresses now have full 32-bit display (dynamically using 4 to 8 hex digits)
-- Workaround for uQLx bug in SCR/CON open procedure which led to all windows overlapping each other!
-- Removed dependency on fixed system variables address - useful when you use Minerva's second screen.
-
-Please note that this is a BETA version and still being worked on. Bug reports and enhancement requests are welcome...
+A Machine code monitor and disassembler for the Sinclair QL, originally written in 1986-87. Many enhancements were added in v3.1. This is a release which I believe is fairly stable. 
+The executable file is in MULTIMON.ZIP, which should be unpacked using QL Unzip v5.41 (see https://dilwyn.qlforum.co.uk/arch/index.html on how to obtain it). This ZIP file also contains the manual in MultiMon.md.
